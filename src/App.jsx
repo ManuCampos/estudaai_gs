@@ -261,9 +261,13 @@ const authModule = {
   login(identifier, password) {
     const db = storage.get();
     const id = identifier.trim().toLowerCase();
-    const user = db.users.find(u =>
-      (u.email.toLowerCase() === id || u.name.toLowerCase() === id) && u.password === password
-    );
+    const user = db.users.find(u => {
+      // Match por email completo, nome completo, ou username (parte antes do @)
+      const emailMatch = u.email.toLowerCase() === id;
+      const nameMatch = u.name.toLowerCase() === id;
+      const usernameMatch = u.email.includes("@") && u.email.split("@")[0].toLowerCase() === id;
+      return (emailMatch || nameMatch || usernameMatch) && u.password === password;
+    });
     if (!user) return { success: false, error: "Usuário ou senha incorretos." };
     _session = user;
     return { success: true, user };
@@ -2893,7 +2897,7 @@ function LoginPage({ onLogin }) {
   const [password, setPassword] = useState("");
   const [error, setError]       = useState("");
   const [loading, setLoading]   = useState(false);
-  const [authMode, setAuthMode] = useState("google"); // "google" | "legacy"
+  const [authMode, setAuthMode] = useState("legacy"); // "google" desabilitado temporariamente
   const googleBtnRef = useRef(null);
 
   useEffect(() => {
@@ -4837,6 +4841,10 @@ function AlunoResumos({ user, refresh }) {
   const [confirmDelete, setConfirmDelete] = useState(null); // { topicId, planoId, name }
   const [expanded, setExpanded] = useState({}); // map topicId → bool
   const [feedback, setFeedback] = useState("");
+  const [associando, setAssociando] = useState(null); // { topicId, planoId, note } — resumo órfão sendo associado
+  const [novoResumo, setNovoResumo] = useState(false); // modal de criar resumo
+  const [novoText, setNovoText] = useState("");
+  const [novoTopicId, setNovoTopicId] = useState(""); // associação opcional
 
   const resumos = progressoModule.listResumos(user.id);
   const filtered = resumos.filter(r => {
@@ -4857,6 +4865,24 @@ function AlunoResumos({ user, refresh }) {
   const gruposOrdenados = Object.values(grupos).sort((a,b) => a.materia.name.localeCompare(b.materia.name));
   gruposOrdenados.forEach(g => g.items.sort((a,b) => (a.updatedAt||"").localeCompare(b.updatedAt||"")));
 
+  // Lista de tópicos disponíveis para associação
+  const getTopicosDisponiveis = () => {
+    const db = storage.get();
+    const planos = (db.planos || []).filter(p => p.alunoId === user.id);
+    const topicos = [];
+    planos.forEach(plano => {
+      const edital = (db.editais || []).find(e => e.id === plano.editalId);
+      if (edital) {
+        (edital.materias || []).forEach(m => {
+          (m.topicos || []).forEach(t => {
+            topicos.push({ id: t.id, name: t.name, materiaName: m.name, planoId: plano.id, editalName: edital.name });
+          });
+        });
+      }
+    });
+    return topicos;
+  };
+
   const showFeedback = (msg) => {
     setFeedback(msg);
     setTimeout(() => setFeedback(""), 2500);
@@ -4866,7 +4892,6 @@ function AlunoResumos({ user, refresh }) {
     if (!editing) return;
     const text = (editing.text || "").trim();
     if (!text) {
-      // Texto vazio = deletar
       progressoModule.deleteNote(user.id, editing.planoId, editing.topicId);
     } else {
       progressoModule.saveNote(user.id, editing.planoId, editing.topicId, text);
@@ -4881,6 +4906,38 @@ function AlunoResumos({ user, refresh }) {
     progressoModule.deleteNote(user.id, confirmDelete.planoId, confirmDelete.topicId);
     setConfirmDelete(null);
     showFeedback("✓ Resumo excluído");
+    refresh && refresh();
+  };
+
+  // Associar resumo órfão a um tópico
+  const handleAssociar = (targetTopicId) => {
+    if (!associando || !targetTopicId) return;
+    const topicos = getTopicosDisponiveis();
+    const target = topicos.find(t => t.id === targetTopicId);
+    if (!target) { showFeedback("Tópico não encontrado"); return; }
+    // Deleta o resumo antigo (órfão)
+    progressoModule.deleteNote(user.id, associando.planoId, associando.topicId);
+    // Salva no novo tópico
+    progressoModule.saveNote(user.id, target.planoId, target.id, associando.note);
+    setAssociando(null);
+    showFeedback("✓ Resumo associado ao tópico");
+    refresh && refresh();
+  };
+
+  // Criar novo resumo
+  const handleCriarResumo = () => {
+    const text = novoText.trim();
+    if (!text) { showFeedback("Digite o conteúdo do resumo"); return; }
+    const db = storage.get();
+    const planos = (db.planos || []).filter(p => p.alunoId === user.id);
+    const plano = planos[0]; // usa o primeiro plano disponível
+    if (!plano) { showFeedback("Nenhum plano ativo. Gere um plano primeiro."); return; }
+    const topicId = novoTopicId || ("avulso_" + Date.now());
+    progressoModule.saveNote(user.id, plano.id, topicId, text);
+    setNovoResumo(false);
+    setNovoText("");
+    setNovoTopicId("");
+    showFeedback("✓ Resumo criado");
     refresh && refresh();
   };
 
@@ -4989,6 +5046,9 @@ xmlns="http://www.w3.org/TR/REC-html40">${html.replace(/<!DOCTYPE.*?>/i, "").rep
           onChange={e => setSearch(e.target.value)}
           style={{flex:"1 1 240px",minWidth:240}}
         />
+        <button className="btn btn-green" onClick={() => { setNovoResumo(true); setNovoText(""); setNovoTopicId(""); }}>
+          + Novo Resumo
+        </button>
         {resumos.length > 0 && (
           <>
             <button className="btn btn-ghost" onClick={() => exportarPDF(filtered)} title="Imprimir/PDF de todos">
@@ -5045,6 +5105,11 @@ xmlns="http://www.w3.org/TR/REC-html40">${html.replace(/<!DOCTYPE.*?>/i, "").rep
                       <button className="btn btn-ghost btn-xs" onClick={() => setExpanded(prev => ({...prev, [r.topicId+"::"+r.planoId]: !prev[r.topicId+"::"+r.planoId]}))} title={isOpen?"Recolher":"Expandir"}>
                         {isOpen ? "🔼" : "🔽"}
                       </button>
+                      {(r.materia.id === "?" || r.topic.name === "Tópico removido") && (
+                        <button className="btn btn-ghost btn-xs" onClick={() => setAssociando({ topicId: r.topicId, planoId: r.planoId, note: r.note, name: r.topic.name })} title="Associar a um tópico" style={{color:"var(--blue)"}}>
+                          🔗
+                        </button>
+                      )}
                       <button className="btn btn-ghost btn-xs" onClick={() => setEditing({ topicId: r.topicId, planoId: r.planoId, text: r.note, name: r.topic.name })} title="Editar">
                         ✏️
                       </button>
@@ -5100,6 +5165,68 @@ xmlns="http://www.w3.org/TR/REC-html40">${html.replace(/<!DOCTYPE.*?>/i, "").rep
             <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
               <button className="btn btn-ghost" onClick={() => setConfirmDelete(null)}>Cancelar</button>
               <button className="btn" style={{background:"var(--red,#ef4444)",color:"#fff"}} onClick={handleExcluir}>Excluir</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de associar resumo órfão a tópico */}
+      {associando && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16}}>
+          <div className="card" style={{maxWidth:560,width:"100%",maxHeight:"80vh",display:"flex",flexDirection:"column"}}>
+            <div className="row-b" style={{marginBottom:10}}>
+              <h3 style={{margin:0,fontSize:15}}>🔗 Associar resumo a um tópico</h3>
+              <button className="btn btn-ghost btn-xs" onClick={() => setAssociando(null)}>✕</button>
+            </div>
+            <p style={{fontSize:12,color:"var(--t3)",margin:"0 0 12px"}}>
+              Resumo: <strong>{associando.name}</strong> — Selecione o tópico de destino:
+            </p>
+            <div style={{flex:1,overflow:"auto",border:"1px solid var(--b2)",borderRadius:8,padding:8}}>
+              {getTopicosDisponiveis().map(t => (
+                <div key={t.id} style={{padding:"8px 10px",borderBottom:"1px solid var(--b1)",cursor:"pointer",fontSize:12,borderRadius:4}} className="hover-row"
+                  onClick={() => handleAssociar(t.id)}>
+                  <div style={{fontWeight:600,color:"var(--t1)"}}>{t.name}</div>
+                  <div style={{fontSize:11,color:"var(--t3)"}}>{t.materiaName} · {t.editalName}</div>
+                </div>
+              ))}
+              {getTopicosDisponiveis().length === 0 && (
+                <p style={{textAlign:"center",color:"var(--t3)",fontSize:12,padding:20}}>Nenhum tópico disponível. Gere um plano primeiro.</p>
+              )}
+            </div>
+            <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}}>
+              <button className="btn btn-ghost" onClick={() => setAssociando(null)}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de novo resumo */}
+      {novoResumo && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16}}>
+          <div className="card" style={{maxWidth:720,width:"100%",maxHeight:"90vh",display:"flex",flexDirection:"column"}}>
+            <div className="row-b" style={{marginBottom:10}}>
+              <h3 style={{margin:0,fontSize:15}}>📝 Novo Resumo</h3>
+              <button className="btn btn-ghost btn-xs" onClick={() => setNovoResumo(false)}>✕</button>
+            </div>
+            <div style={{marginBottom:12}}>
+              <label className="lbl" style={{fontSize:12}}>Associar a um tópico (opcional)</label>
+              <select className="inp" value={novoTopicId} onChange={e => setNovoTopicId(e.target.value)} style={{fontSize:12}}>
+                <option value="">— Nenhum (resumo avulso) —</option>
+                {getTopicosDisponiveis().map(t => (
+                  <option key={t.id} value={t.id}>{t.name} ({t.materiaName})</option>
+                ))}
+              </select>
+            </div>
+            <textarea
+              value={novoText}
+              onChange={e => setNovoText(e.target.value)}
+              autoFocus
+              style={{flex:1,minHeight:250,padding:12,borderRadius:8,border:"1.5px solid var(--b2)",background:"var(--s2)",color:"var(--t1)",fontSize:13,lineHeight:1.6,fontFamily:"inherit",resize:"vertical"}}
+              placeholder="Digite seu resumo aqui..."
+            />
+            <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}}>
+              <button className="btn btn-ghost" onClick={() => setNovoResumo(false)}>Cancelar</button>
+              <button className="btn btn-green" onClick={handleCriarResumo}>💾 Salvar Resumo</button>
             </div>
           </div>
         </div>
@@ -5458,6 +5585,114 @@ function AdminDebug() {
               <div style={{textAlign:"center"}}><div style={{fontSize:22,fontWeight:900,fontFamily:"Cabinet Grotesk",color:"var(--amber)"}}>{Object.values(plano.plan).reduce((a,d)=>a+d.reviews.length,0)}</div><div style={{fontSize:11,color:"var(--t3)",fontWeight:700,textTransform:"uppercase"}}>Total revisões</div></div>
             </div>
             <PBar pct={stats?.pct||0} color="var(--green)"/>
+          </div>
+
+          {/* Ações de simulação */}
+          <div className="card" style={{marginTop:16}}>
+            <div className="card-title">⚡ Ações de Simulação</div>
+            <p style={{fontSize:11,color:"var(--t3)",margin:"0 0 12px"}}>Simule cenários para testar o comportamento do sistema.</p>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+              <button className="btn btn-green btn-sm" onClick={() => {
+                // Marcar todas as aulas do dia simulado como concluídas
+                const dk = simKey;
+                const dd = plano.plan[dk] || { topicos:[], reviews:[] };
+                dd.topicos.forEach(t => { progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${t.id}`); });
+                dd.reviews.forEach(r => { progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${r.id}-rev`); });
+                alert(`✓ ${dd.topicos.length} aulas + ${dd.reviews.length} revisões marcadas como concluídas em ${dk}`);
+              }}>
+                ✅ Concluir dia {simDt.toLocaleDateString("pt-BR",{day:"2-digit",month:"2-digit"})}
+              </button>
+              <button className="btn btn-blue btn-sm" onClick={() => {
+                // Concluir próximos N dias
+                const n = parseInt(prompt("Quantos dias a partir da data simulada deseja concluir?", "7"));
+                if (!n || isNaN(n)) return;
+                let count = 0;
+                for (let i = 0; i < n; i++) {
+                  const d = new Date(simDt); d.setDate(simDt.getDate() + i);
+                  const dk = localDateKey(d);
+                  const dd = plano.plan[dk] || { topicos:[], reviews:[] };
+                  dd.topicos.forEach(t => { progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${t.id}`); count++; });
+                  dd.reviews.forEach(r => { progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${r.id}-rev`); count++; });
+                }
+                alert(`✓ ${count} itens concluídos em ${n} dias`);
+              }}>
+                📅 Concluir próximos N dias
+              </button>
+              <button className="btn btn-ghost btn-sm" style={{color:"var(--amber)"}} onClick={() => {
+                // Simular pular dias (não estudar) — remove progresso dos próximos N dias
+                const n = parseInt(prompt("Quantos dias deseja simular como NÃO estudados (remove progresso)?", "3"));
+                if (!n || isNaN(n)) return;
+                let count = 0;
+                for (let i = 0; i < n; i++) {
+                  const d = new Date(simDt); d.setDate(simDt.getDate() + i);
+                  const dk = localDateKey(d);
+                  const dd = plano.plan[dk] || { topicos:[], reviews:[] };
+                  dd.topicos.forEach(t => {
+                    const key = `${dk}-${t.id}`;
+                    storage.set(db => ({ ...db, progresso: (db.progresso||[]).filter(p => !(p.alunoId===selectedAluno && p.planoId===plano.id && p.key===key)) }));
+                    count++;
+                  });
+                  dd.reviews.forEach(r => {
+                    const key = `${dk}-${r.id}-rev`;
+                    storage.set(db => ({ ...db, progresso: (db.progresso||[]).filter(p => !(p.alunoId===selectedAluno && p.planoId===plano.id && p.key===key)) }));
+                    count++;
+                  });
+                }
+                alert(`✓ Progresso removido de ${count} itens em ${n} dias (simulando não estudar)`);
+              }}>
+                ⏭️ Simular não estudar N dias
+              </button>
+              <button className="btn btn-ghost btn-sm" style={{color:"var(--purple)"}} onClick={() => {
+                // Concluir apenas metade das aulas do dia (simula estudo parcial)
+                const dk = simKey;
+                const dd = plano.plan[dk] || { topicos:[], reviews:[] };
+                const half = Math.ceil(dd.topicos.length / 2);
+                dd.topicos.slice(0, half).forEach(t => { progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${t.id}`); });
+                alert(`✓ ${half} de ${dd.topicos.length} aulas concluídas (estudo parcial)`);
+              }}>
+                ½ Estudo parcial do dia
+              </button>
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <button className="btn btn-ghost btn-sm" style={{color:"var(--red)"}} onClick={() => {
+                // Limpar todo o progresso do aluno
+                if (!confirm(`Tem certeza? Isso vai APAGAR todo o progresso de ${aluno.name}.`)) return;
+                storage.set(db => ({ ...db, progresso: (db.progresso||[]).filter(p => !(p.alunoId===selectedAluno && p.planoId===plano.id)) }));
+                alert("✓ Todo o progresso foi resetado.");
+              }}>
+                🗑️ Resetar todo progresso
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => {
+                // Concluir todas as aulas de uma matéria específica
+                const materias = edital?.materias || [];
+                const nomes = materias.map((m,i) => `${i+1}. ${m.name}`).join("\n");
+                const idx = parseInt(prompt(`Qual matéria concluir inteira?\n\n${nomes}\n\nDigite o número:`, "1"));
+                if (!idx || isNaN(idx) || idx < 1 || idx > materias.length) return;
+                const mat = materias[idx-1];
+                const topicIds = new Set((mat.topicos||[]).map(t=>t.id));
+                let count = 0;
+                Object.entries(plano.plan).forEach(([dk, dd]) => {
+                  dd.topicos.filter(t => topicIds.has(t.id)).forEach(t => {
+                    progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${t.id}`);
+                    count++;
+                  });
+                });
+                alert(`✓ ${count} aulas de "${mat.name}" marcadas como concluídas`);
+              }}>
+                📚 Concluir matéria inteira
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => {
+                // Gerar resumos fake para tópicos do dia
+                const dk = simKey;
+                const dd = plano.plan[dk] || { topicos:[], reviews:[] };
+                dd.topicos.forEach(t => {
+                  progressoModule.saveNote(selectedAluno, plano.id, t.id, `[Resumo simulado] ${t.name}\n\nConteúdo de teste gerado pelo módulo de debug em ${new Date().toLocaleString("pt-BR")}.`);
+                });
+                alert(`✓ ${dd.topicos.length} resumos simulados criados para o dia ${dk}`);
+              }}>
+                📝 Gerar resumos fake do dia
+              </button>
+            </div>
           </div>
         </>
       )}
