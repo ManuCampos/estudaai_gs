@@ -2,6 +2,7 @@
 // EstudaAI — Google Apps Script (Web App API) — COMPLETO
 // ============================================================
 const SPREADSHEET_IDS = {
+  app_state:              '1MLHexGSJ3sXypKbjxxaNhEui8zyJ-ZbR632nTsj1uZo',
   users:                  '1A05SbFOs8M8d_cUYfPdaP-huq4OU5Dl0dWL3dVgUceY',
   editais:                '1JuHSkRxv1hvFB0YX-G67VMAEd_Rh11nMZMAgrkVw1d8',
   materias:               '1ft_Q0p31uOUPVUEc4zn1DpJWRvja3EyFSimf0MA2TJo',
@@ -36,15 +37,52 @@ function gDelete(sheet,body){if(!body.id)return err('ID obrigatório',400);const
 // ROUTER
 function doGet(e){try{const a=e.parameter.action,m=e.parameter.module;
 switch(m){
-case 'users':return hUsersG(a,e.parameter);case 'editais':return hEditaisG(a,e.parameter);case 'materias':return hMateriasG(a,e.parameter);case 'topicos':return hTopicosG(a,e.parameter);case 'aluno_editais':return hAEG(a,e.parameter);case 'planos':return hPlanosG(a,e.parameter);case 'progresso':return hProgG(a,e.parameter);case 'study_notes':return hNotesG(a,e.parameter);case 'gamificacao':return hGamG(a,e.parameter);case 'simulados':return hSimG(a,e.parameter);case 'questoes':return hQuestG(a,e.parameter);case 'tentativas':return hTentG(a,e.parameter);case 'batalhas':return hBatG(a,e.parameter);case 'batalha_participantes':return hBPG(a,e.parameter);case 'feedback_simulado':return hFBG(a,e.parameter);case 'resumo_comments':return hRCG(a,e.parameter);case 'resumo_additions':return hRAG(a,e.parameter);case 'logs':return hLogsG(a,e.parameter);
+case 'app_state':return hAppStateG(a,e.parameter);case 'users':return hUsersG(a,e.parameter);case 'editais':return hEditaisG(a,e.parameter);case 'materias':return hMateriasG(a,e.parameter);case 'topicos':return hTopicosG(a,e.parameter);case 'aluno_editais':return hAEG(a,e.parameter);case 'planos':return hPlanosG(a,e.parameter);case 'progresso':return hProgG(a,e.parameter);case 'study_notes':return hNotesG(a,e.parameter);case 'gamificacao':return hGamG(a,e.parameter);case 'simulados':return hSimG(a,e.parameter);case 'questoes':return hQuestG(a,e.parameter);case 'tentativas':return hTentG(a,e.parameter);case 'batalhas':return hBatG(a,e.parameter);case 'batalha_participantes':return hBPG(a,e.parameter);case 'feedback_simulado':return hFBG(a,e.parameter);case 'resumo_comments':return hRCG(a,e.parameter);case 'resumo_additions':return hRAG(a,e.parameter);case 'logs':return hLogsG(a,e.parameter);
 default:return err('Módulo: '+m,404);}
 }catch(ex){return err(ex.message,500);}}
 
 function doPost(e){try{const body=JSON.parse(e.postData.contents);const a=body.action,m=body.module;
 switch(m){
-case 'users':return hUsersP(a,body);case 'editais':return hEditaisP(a,body);case 'materias':return hMateriasP(a,body);case 'topicos':return hTopicosP(a,body);case 'aluno_editais':return hAEP(a,body);case 'planos':return hPlanosP(a,body);case 'progresso':return hProgP(a,body);case 'study_notes':return hNotesP(a,body);case 'gamificacao':return hGamP(a,body);case 'simulados':return hSimP(a,body);case 'questoes':return hQuestP(a,body);case 'tentativas':return hTentP(a,body);case 'batalhas':return hBatP(a,body);case 'batalha_participantes':return hBPP(a,body);case 'feedback_simulado':return hFBP(a,body);case 'resumo_comments':return hRCP(a,body);case 'resumo_additions':return hRAP(a,body);case 'logs':return hLogsP(a,body);
+case 'app_state':return hAppStateP(a,body);case 'users':return hUsersP(a,body);case 'editais':return hEditaisP(a,body);case 'materias':return hMateriasP(a,body);case 'topicos':return hTopicosP(a,body);case 'aluno_editais':return hAEP(a,body);case 'planos':return hPlanosP(a,body);case 'progresso':return hProgP(a,body);case 'study_notes':return hNotesP(a,body);case 'gamificacao':return hGamP(a,body);case 'simulados':return hSimP(a,body);case 'questoes':return hQuestP(a,body);case 'tentativas':return hTentP(a,body);case 'batalhas':return hBatP(a,body);case 'batalha_participantes':return hBPP(a,body);case 'feedback_simulado':return hFBP(a,body);case 'resumo_comments':return hRCP(a,body);case 'resumo_additions':return hRAP(a,body);case 'logs':return hLogsP(a,body);
 default:return err('Módulo: '+m,404);}
 }catch(ex){return err(ex.message,500);}}
+
+// APP_STATE — JSON monolítico (substitui Supabase app_state)
+function hAppStateG(a,p){
+  const s=getSheet('app_state');
+  switch(a){
+    case 'load':{
+      const d=s.getDataRange().getValues();
+      if(d.length<2) return json(null);
+      // Coluna A=id, B=data (JSON), C=updated_at
+      const row=d[1]; // primeira linha de dados (id="main")
+      try { return json({ data: JSON.parse(row[1]), updated_at: row[2] }); }
+      catch(e) { return json(null); }
+    }
+    default: return err('Ação: '+a,400);
+  }
+}
+function hAppStateP(a,body){
+  const s=getSheet('app_state');
+  switch(a){
+    case 'save':{
+      const now=new Date().toISOString();
+      const dataStr=JSON.stringify(body.data||{});
+      const d=s.getDataRange().getValues();
+      if(d.length<2){
+        // Primeira vez: cria headers + linha
+        s.getRange(1,1,1,3).setValues([['id','data','updated_at']]);
+        s.appendRow(['main',dataStr,now]);
+      } else {
+        // Atualiza linha existente
+        s.getRange(2,2).setValue(dataStr);
+        s.getRange(2,3).setValue(now);
+      }
+      return json({ updated_at: now });
+    }
+    default: return err('Ação: '+a,400);
+  }
+}
 
 // USERS
 function hUsersG(a,p){const s=getSheet('users');switch(a){case 'getAll':return json(sheetToArray(s));case 'getById':{const u=sheetToArray(s).find(x=>x.id===p.id);return u?json(u):err('Não encontrado',404);}case 'getByEmail':{const u=sheetToArray(s).find(x=>x.email===p.email);return json(u||null);}case 'getCoaches':return json(sheetToArray(s).filter(u=>u.role==='coach'));case 'getAlunos':{let a2=sheetToArray(s).filter(u=>u.role==='aluno');if(p.coachId)a2=a2.filter(u=>u.coach_id===p.coachId);return json(a2);}default:return err('Ação: '+a,400);}}

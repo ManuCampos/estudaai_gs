@@ -1,69 +1,39 @@
 // ============================================================
-// EstudaAI — Sistema de Gestão de Estudos v4.1
+// EstudaAI — Sistema de Gestão de Estudos v4.2
 // Arquitetura modular: auth / users / editais / planos / progresso
 // Perfis: Admin | Coach | Aluno
-// Persistência: Supabase (PostgreSQL)
+// Persistência: Google Apps Script (Google Sheets)
 // ============================================================
 
 import { useState, useRef, createContext, useContext, useEffect, Component } from "react";
-import { createClient } from "@supabase/supabase-js";
-import { initGoogleAuth, renderGoogleButton, googleLogout } from "./googleAuth.js";
-import { sheetsUsersModule } from "./sheetsApi.js";
+// import { initGoogleAuth, renderGoogleButton, googleLogout } from "./googleAuth.js";
 
 // ============================================================
-// SUPABASE — Cliente e persistência
+// GOOGLE APPS SCRIPT — Cliente e persistência
 // ============================================================
-const SUPABASE_URL = "https://ogmlsmmybqmrnrilzesg.supabase.co";
-const SUPABASE_KEY = "sb_publishable_dsUx1e6SQo_yuXg77NN-MA_HEL33DSo";
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhT495ELPbDX_d9ph28WbFzUYzTdwu5sau9LkUZu7-FbReLWuXpC2I8GjuJrE3ZOVWGA/exec";
 
-// Controle de sincronização — evita que abas com dados antigos sobrescrevam mudanças
-// feitas em outra aba/dispositivo. Usa concorrência otimista via comparação de updated_at.
 let _persistTimer = null;
-let _lastSyncedAt = null;   // updated_at do snapshot que está em _db
-let _isReloading  = false;  // evita reload reentrante
-let _onRemoteReload = null; // callback opcional disparado quando recarregamos do servidor
+let _isReloading  = false;
+let _onRemoteReload = null;
 
-function persistToSupabase(db) {
+function persistToSheets(db) {
   clearTimeout(_persistTimer);
   _persistTimer = setTimeout(async () => {
     if (_isReloading) return;
     try {
-      const now = new Date().toISOString();
-      // Primeira escrita (ou registro ainda inexistente) — upsert seguro
-      if (!_lastSyncedAt) {
-        const { data, error } = await supabase
-          .from("app_state")
-          .upsert({ id: "main", data: db, updated_at: now })
-          .select();
-        if (!error) _lastSyncedAt = (data && data[0]?.updated_at) || now;
-        else console.warn("[EstudaAI] Supabase upsert error:", error);
-        return;
-      }
-      // Escritas seguintes: só atualiza se o updated_at remoto continuar
-      // sendo o mesmo que carregamos. Se outra aba escreveu nesse meio-tempo,
-      // 0 linhas serão afetadas e nós recarregamos em vez de sobrescrever.
-      const { data: updatedRows, error } = await supabase
-        .from("app_state")
-        .update({ data: db, updated_at: now })
-        .eq("id", "main")
-        .eq("updated_at", _lastSyncedAt)
-        .select();
-      if (error) {
-        console.warn("[EstudaAI] Supabase update error:", error);
-        return;
-      }
-      if (!updatedRows || updatedRows.length === 0) {
-        console.warn("[EstudaAI] Conflito detectado — outra aba/dispositivo alterou os dados. Recarregando para evitar sobrescrita.");
-        await storage.load();
-        if (typeof _onRemoteReload === "function") _onRemoteReload();
-        return;
-      }
-      _lastSyncedAt = now;
+      // Salva no localStorage imediatamente (cache local)
+      try { localStorage.setItem("estudaai_db", JSON.stringify(db)); } catch(e) {}
+      // Persiste no Google Sheets via Apps Script
+      await fetch(APPS_SCRIPT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ module: "app_state", action: "save", data: db }),
+      });
     } catch (e) {
-      console.warn("[EstudaAI] Supabase persist error:", e);
+      console.warn("[EstudaAI] Apps Script persist error:", e);
     }
-  }, 800);
+  }, 1200);
 }
 
 // ============================================================
@@ -225,25 +195,34 @@ const storage = {
   set(updater) {
     _db = typeof updater === "function" ? updater(_db) : { ..._db, ...updater };
     _listeners.forEach(fn => fn(_db));
-    persistToSupabase(_db);
+    persistToSheets(_db);
     return _db;
   },
   async load() {
     if (_isReloading) return;
     _isReloading = true;
     try {
-      const { data, error } = await supabase
-        .from("app_state")
-        .select("data, updated_at")
-        .eq("id", "main")
-        .single();
-      if (data?.data && !error) {
-        _db = { ...defaultDB, ...data.data };
-        _lastSyncedAt = data.updated_at || null;
+      // Carrega do localStorage primeiro (rápido, offline)
+      try {
+        const local = localStorage.getItem("estudaai_db");
+        if (local) {
+          const parsed = JSON.parse(local);
+          if (parsed && parsed.users) {
+            _db = { ...defaultDB, ...parsed };
+            _listeners.forEach(fn => fn(_db));
+          }
+        }
+      } catch(e) {}
+      // Depois carrega do Apps Script (fonte de verdade)
+      const res = await fetch(`${APPS_SCRIPT_URL}?module=app_state&action=load`);
+      const json = await res.json();
+      if (json.status === "ok" && json.data?.data) {
+        _db = { ...defaultDB, ...json.data.data };
         _listeners.forEach(fn => fn(_db));
+        try { localStorage.setItem("estudaai_db", JSON.stringify(_db)); } catch(e) {}
       }
     } catch (e) {
-      console.warn("[EstudaAI] Supabase load error:", e);
+      console.warn("[EstudaAI] Apps Script load error:", e);
     } finally {
       _isReloading = false;
     }
@@ -1750,7 +1729,7 @@ planosModule.importarAulaJaEstudada = function(planoId, alunoId, topicId, comple
   });
 
   logModule.add(alunoId, `Aula importada manualmente: ${topicObj.name}`, { planoId, topicId, completionDateKey, reviewIntervals });
-  persistToSupabase();
+  persistToSheets(storage.get());
 };
 
 // ============================================================
@@ -2930,40 +2909,7 @@ function LoginPage({ onLogin }) {
   const googleBtnRef = useRef(null);
 
   useEffect(() => {
-    // Inicializa Google OAuth
-    initGoogleAuth(async (googleUser) => {
-      setLoading(true);
-      setError("");
-      try {
-        // Busca ou cria usuário na planilha
-        const user = await sheetsUsersModule.upsertByEmail({
-          email: googleUser.email,
-          name: googleUser.name,
-          avatar_url: googleUser.avatar_url,
-        });
-        // Sincroniza com o storage local para manter compatibilidade
-        const db = storage.get();
-        const existsLocally = db.users.find(u => u.email === user.email);
-        if (!existsLocally) {
-          storage.set(d => ({ ...d, users: [...d.users, { id: user.id, name: user.name, email: user.email, role: user.role, coachId: user.coach_id || "", createdAt: user.created_at }] }));
-        } else if (existsLocally.id !== user.id) {
-          // Atualiza o ID local para bater com o da planilha
-          storage.set(d => ({ ...d, users: d.users.map(u => u.email === user.email ? { ...u, id: user.id, name: user.name } : u) }));
-        }
-        const localUser = { id: user.id, name: user.name, email: user.email, role: user.role, coachId: user.coach_id || "", avatar_url: user.avatar_url };
-        _session = localUser;
-        onLogin(localUser);
-      } catch (err) {
-        setError("Erro ao fazer login com Google: " + err.message);
-        setLoading(false);
-      }
-    });
-    // Renderiza botão Google após um tick
-    setTimeout(() => {
-      if (document.getElementById("google-login-btn")) {
-        renderGoogleButton("google-login-btn");
-      }
-    }, 300);
+    // Google OAuth desabilitado — login apenas por email/senha
   }, []);
 
   function pickProfile(p) {
@@ -3518,16 +3464,9 @@ function CoachEditais({ user, refresh }) {
     if (!file || matAttach===null) return;
     if (file.size > 20 * 1024 * 1024) { setMatAttach(a=>({...a,error:"Arquivo muito grande. Máximo 20MB."})); return; }
     setMatAttach(a=>({...a,uploading:true,error:null}));
-    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g,'_');
-    const path = `topicos/${Date.now()}_${safeName}`;
-    const { error } = await supabase.storage.from('materiais').upload(path, file, {upsert:true});
-    if (error) {
-      setMatAttach(a=>({...a,uploading:false,error:`Erro no upload: ${error.message}. Use a aba URL.`}));
-      return;
-    }
-    const { data: { publicUrl } } = supabase.storage.from('materiais').getPublicUrl(path);
-    setMatForm(f=>({...f,topicos:f.topicos.map((t,i)=>i===matAttach.idx?{...t,materialUrl:publicUrl,materialName:file.name}:t)}));
-    setMatAttach(null);
+    // Upload de arquivo desabilitado (sem Supabase Storage). Use URL do Google Drive.
+    setMatAttach(a=>({...a,uploading:false,error:"Upload de arquivo não disponível. Use a opção de URL (Google Drive, etc)."}));
+    return;
   }
   function saveUrlAttach() {
     const url = matAttach?.urlInput?.trim();
@@ -3896,7 +3835,7 @@ function CoachGerenciarPlanos({ user, refresh }) {
   function desmarcarComoConcluida(alunoId, planoId, date, topicId) {
     if (anotacao.trim()) salvarAlteracao(alunoId, planoId, topicId, date, "mark_pending", anotacao);
     progressoModule.toggle(alunoId, planoId, `${date}-${topicId}`);
-    persistToSupabase(storage.get());
+    persistToSheets(storage.get());
     setModalAula(null);
     setAnotacao("");
     setSuccessMessage("⏳ Aula marcada como pendente!");
@@ -3915,7 +3854,7 @@ function CoachGerenciarPlanos({ user, refresh }) {
           plan: { ...p.plan, [date]: { ...p.plan[date], topicos: p.plan[date].topicos.filter(t => t.id !== topicId) } }
         } : p),
       }));
-      persistToSupabase(storage.get());
+      persistToSheets(storage.get());
     }
     setModalAula(null);
     setAnotacao("");
@@ -3928,7 +3867,7 @@ function CoachGerenciarPlanos({ user, refresh }) {
     if (!newDate) return;
     salvarAlteracao(alunoId, planoId, topicId, date, "reschedule", `Movido de ${date} para ${newDate}`);
 
-    persistToSupabase(storage.get());
+    persistToSheets(storage.get());
 
     const plano = planosModule.getById(planoId);
     if (plano?.plan) {
@@ -3944,7 +3883,7 @@ function CoachGerenciarPlanos({ user, refresh }) {
           ...db,
           planos: db.planos.map(p => p.id === planoId ? { ...p, plan: novoPlano } : p),
         }));
-        persistToSupabase(storage.get());
+        persistToSheets(storage.get());
       }
     }
     setModalAula(null);
@@ -6372,7 +6311,7 @@ function CoachConteudo({ user, refresh }) {
       });
 
       storage.get().materiais = materiais;
-      persistToSupabase(storage.get());
+      persistToSheets(storage.get());
 
       const editaisCount = selectedEditaisForUpload.size;
       setUrlSuccess(`Arquivo "${fileType}" adicionado em ${editaisCount} edital${editaisCount > 1 ? 'is' : ''}!`);
@@ -6403,7 +6342,7 @@ function CoachConteudo({ user, refresh }) {
         storage.get().materiais = materiais;
       }
 
-      persistToSupabase(storage.get());
+      persistToSheets(storage.get());
       refresh?.();
     }
   };
@@ -6663,7 +6602,7 @@ function CoachResumos({ user, refresh }) {
     const comment = editComment[topicId] || "";
     setSavingState(s => ({ ...s, [topicId]: true }));
     resumoModule.saveCoachComment(alunoId, plano.id, topicId, user.id, comment);
-    persistToSupabase(storage.get());
+    persistToSheets(storage.get());
     setTimeout(() => {
       setSavingState(s => ({ ...s, [topicId]: false }));
       setEditComment(c => ({ ...c, [topicId]: "" }));
@@ -6676,7 +6615,7 @@ function CoachResumos({ user, refresh }) {
     const addition = editAddition[topicId] || "";
     setSavingState(s => ({ ...s, [`add-${topicId}`]: true }));
     resumoModule.saveCoachAddition(alunoId, plano.id, topicId, user.id, addition);
-    persistToSupabase(storage.get());
+    persistToSheets(storage.get());
     setTimeout(() => {
       setSavingState(s => ({ ...s, [`add-${topicId}`]: false }));
       setEditAddition(a => ({ ...a, [topicId]: "" }));
@@ -6726,7 +6665,7 @@ function CoachResumos({ user, refresh }) {
         return { ...db, planos };
       });
     }
-    persistToSupabase(storage.get());
+    persistToSheets(storage.get());
     setModalMarcarData(null);
     setDataRealizacao("");
 
@@ -9421,21 +9360,6 @@ export default function App() {
     // Quando um conflito for detectado e recarregarmos do servidor, força re-render
     storage.onRemoteReload(() => refresh());
 
-    // Realtime: se outra aba/dispositivo alterar o app_state, recarrega
-    let channel = null;
-    try {
-      channel = supabase
-        .channel('app_state_changes')
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'app_state', filter: 'id=eq.main' },
-          () => { storage.load().then(() => refresh()); }
-        )
-        .subscribe();
-    } catch (e) {
-      console.warn("[EstudaAI] Realtime subscribe error:", e);
-    }
-
     // Recarrega quando a aba volta ao foco — protege contra abas dormentes com dados antigos
     const onFocus = () => { storage.load().then(() => refresh()); };
     const onVisibility = () => { if (document.visibilityState === 'visible') onFocus(); };
@@ -9443,7 +9367,6 @@ export default function App() {
     document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
-      try { if (channel) supabase.removeChannel(channel); } catch(e) {}
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibility);
     };
@@ -9455,7 +9378,6 @@ export default function App() {
   }
   function handleLogout()  {
     try { localStorage.removeItem('estudaai_session'); } catch(e) {}
-    googleLogout();
     authModule.logout(); setUser(null); setPage("dashboard");
   }
 
