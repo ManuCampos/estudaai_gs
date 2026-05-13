@@ -6224,7 +6224,7 @@ function ResolverSimulado({ tentativaId, onVoltar }) {
             Deixar em branco
           </button>
           <button
-            onClick={() => {
+            onClick={async () => {
               if (await confirmar({ titulo: "Finalizar simulado?", mensagem: "As questões não respondidas contarão como em branco.", tipo: "destrutivo", confirmLabel: "Finalizar" })) {
                 tentativasModule.finalizar(tentativaId, tempoDecorridoSegundos);
                 onVoltar();
@@ -7245,7 +7245,7 @@ function CoachSimulados({ user, refresh }) {
                     </div>
                     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                       <button
-                        onClick={(e) => {
+                        onClick={async (e) => {
                           e.stopPropagation();
                           if (await confirmar({ titulo: "Deletar simulado?", mensagem: `Tem certeza que deseja deletar o simulado "${sim.nome}"? Todas as questões e tentativas serão removidas.`, tipo: "destrutivo" })) {
                             simuladosModule.delete(sim.id);
