@@ -18,11 +18,11 @@ let _isReloading  = false;
 let _onRemoteReload = null;
 let _prevDb = null; // snapshot anterior para detectar mudanças
 
-// Helper: POST ao Apps Script
+// Helper: POST ao Apps Script (usa text/plain para evitar preflight CORS)
 async function sheetsPost(module, action, body = {}) {
   const res = await fetch(APPS_SCRIPT_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "text/plain" },
     body: JSON.stringify({ module, action, ...body }),
   });
   return await res.json();
@@ -86,7 +86,7 @@ function persistToSheets(db) {
       if (changedKeys.includes('_full') || changedKeys.includes('_materialFiles')) {
         await fetch(APPS_SCRIPT_URL, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "text/plain" },
           body: JSON.stringify({ module: "app_state", action: "save", data: db }),
         });
         return; // app_state já tem tudo
@@ -99,7 +99,7 @@ function persistToSheets(db) {
         try {
           await fetch(APPS_SCRIPT_URL, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "text/plain" },
             body: JSON.stringify({ module: sheetModule, action: "sync", items: db[key] || [] }),
           });
         } catch(e) {
@@ -111,7 +111,7 @@ function persistToSheets(db) {
       // Também atualiza o app_state como backup (debounced, menos frequente)
       await fetch(APPS_SCRIPT_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "text/plain" },
         body: JSON.stringify({ module: "app_state", action: "save", data: db }),
       });
 
