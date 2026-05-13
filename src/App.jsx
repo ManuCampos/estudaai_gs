@@ -16,7 +16,44 @@ const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhT495ELPbDX_d
 let _persistTimer = null;
 let _isReloading  = false;
 let _onRemoteReload = null;
+let _prevDb = null; // snapshot anterior para detectar mudanças
 
+// Helper: POST ao Apps Script
+async function sheetsPost(module, action, body = {}) {
+  const res = await fetch(APPS_SCRIPT_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ module, action, ...body }),
+  });
+  return await res.json();
+}
+
+// Helper: GET ao Apps Script
+async function sheetsGet(module, action, params = {}) {
+  const query = new URLSearchParams({ module, action, ...params }).toString();
+  const res = await fetch(`${APPS_SCRIPT_URL}?${query}`);
+  return await res.json();
+}
+
+// Mapeamento _db key → módulo do Apps Script
+const DB_TO_SHEET = {
+  users: 'users',
+  editais: 'editais',
+  planos: 'planos',
+  progresso: 'progresso',
+  studyNotes: 'study_notes',
+  gamificacao: 'gamificacao',
+  simulados: 'simulados',
+  questoes: 'questoes',
+  tentativas: 'tentativas',
+  batalhas: 'batalhas',
+  feedbackSimulado: 'feedback_simulado',
+  resumoComments: 'resumo_comments',
+  resumoAdditions: 'resumo_additions',
+  logs: 'logs',
+};
+
+// Persistência granular: detecta o que mudou e grava apenas nas planilhas afetadas
 function persistToSheets(db) {
   clearTimeout(_persistTimer);
   _persistTimer = setTimeout(async () => {
@@ -24,12 +61,60 @@ function persistToSheets(db) {
     try {
       // Salva no localStorage imediatamente (cache local)
       try { localStorage.setItem("estudaai_db", JSON.stringify(db)); } catch(e) {}
-      // Persiste no Google Sheets via Apps Script
+
+      // Detecta quais coleções mudaram
+      const changedKeys = [];
+      if (_prevDb) {
+        for (const key of Object.keys(DB_TO_SHEET)) {
+          if (db[key] !== _prevDb[key]) {
+            changedKeys.push(key);
+          }
+        }
+        // materialFiles não tem planilha própria, vai no app_state
+        if (db.materialFiles !== _prevDb.materialFiles) changedKeys.push('_materialFiles');
+      } else {
+        // Primeira vez: grava tudo no app_state como backup
+        changedKeys.push('_full');
+      }
+
+      // Atualiza snapshot
+      _prevDb = { ...db };
+
+      if (changedKeys.length === 0) return;
+
+      // Se é a primeira gravação ou mudou materialFiles, grava no app_state (backup completo)
+      if (changedKeys.includes('_full') || changedKeys.includes('_materialFiles')) {
+        await fetch(APPS_SCRIPT_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ module: "app_state", action: "save", data: db }),
+        });
+        return; // app_state já tem tudo
+      }
+
+      // Grava granularmente: cada coleção que mudou vai para sua planilha
+      const promises = changedKeys.map(async (key) => {
+        const sheetModule = DB_TO_SHEET[key];
+        if (!sheetModule) return;
+        try {
+          await fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ module: sheetModule, action: "sync", items: db[key] || [] }),
+          });
+        } catch(e) {
+          console.warn(`[EstudaAI] Persist ${key} error:`, e);
+        }
+      });
+      await Promise.allSettled(promises);
+
+      // Também atualiza o app_state como backup (debounced, menos frequente)
       await fetch(APPS_SCRIPT_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ module: "app_state", action: "save", data: db }),
       });
+
     } catch (e) {
       console.warn("[EstudaAI] Apps Script persist error:", e);
     }
@@ -209,15 +294,18 @@ const storage = {
           const parsed = JSON.parse(local);
           if (parsed && parsed.users) {
             _db = { ...defaultDB, ...parsed };
+            _prevDb = { ..._db };
             _listeners.forEach(fn => fn(_db));
           }
         }
       } catch(e) {}
-      // Depois carrega do Apps Script (fonte de verdade)
+
+      // Carrega do Apps Script (app_state como fonte de verdade)
       const res = await fetch(`${APPS_SCRIPT_URL}?module=app_state&action=load`);
       const json = await res.json();
       if (json.status === "ok" && json.data?.data) {
         _db = { ...defaultDB, ...json.data.data };
+        _prevDb = { ..._db };
         _listeners.forEach(fn => fn(_db));
         try { localStorage.setItem("estudaai_db", JSON.stringify(_db)); } catch(e) {}
       }

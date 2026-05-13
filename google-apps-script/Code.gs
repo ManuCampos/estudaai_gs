@@ -34,6 +34,43 @@ function err(msg,code){return ContentService.createTextOutput(JSON.stringify({st
 function gUpdate(sheet,body){if(!body.id)return err('ID obrigatório',400);const ri=findRowIndex(sheet,'id',body.id);if(ri===-1)return err('Não encontrado',404);const h=sheet.getRange(1,1,1,sheet.getLastColumn()).getValues()[0];const cr=sheet.getRange(ri,1,1,h.length).getValues()[0];const c={};h.forEach((hh,i)=>{c[hh]=cr[i];});const d=body.data||{};Object.keys(d).forEach(k=>{if(typeof d[k]==='object'&&d[k]!==null)d[k]=JSON.stringify(d[k]);});updateRow(sheet,ri,{...c,...d,id:body.id});return json({...c,...d,id:body.id});}
 function gDelete(sheet,body){if(!body.id)return err('ID obrigatório',400);const ri=findRowIndex(sheet,'id',body.id);if(ri===-1)return err('Não encontrado',404);deleteRow(sheet,ri);return json({deleted:body.id});}
 
+// SYNC GENÉRICO — Full replace: limpa a planilha e grava todos os items
+// Recebe { module, action:"sync", items: [...] }
+// Cada item é um objeto. Os headers são extraídos do primeiro item ou mantidos os existentes.
+function gSync(sheetKey, items) {
+  if (!Array.isArray(items)) return err('items deve ser array', 400);
+  const s = getSheet(sheetKey);
+  const existingHeaders = s.getRange(1, 1, 1, Math.max(s.getLastColumn(), 1)).getValues()[0].filter(h => h !== '');
+
+  // Determina headers: usa existentes se houver, senão extrai dos items
+  let headers = existingHeaders.length > 0 ? existingHeaders : [];
+  if (headers.length === 0 && items.length > 0) {
+    headers = Object.keys(items[0]);
+    s.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+  if (headers.length === 0) return json({ synced: 0 });
+
+  // Limpa dados existentes (mantém header)
+  if (s.getLastRow() > 1) {
+    s.getRange(2, 1, s.getLastRow() - 1, s.getLastColumn()).clearContent();
+    if (s.getLastRow() > 1) {
+      try { s.deleteRows(2, s.getLastRow() - 1); } catch(e) {}
+    }
+  }
+
+  // Grava todos os items
+  if (items.length === 0) return json({ synced: 0 });
+  const rows = items.map(item => {
+    return headers.map(h => {
+      const v = item[h];
+      if (v === undefined || v === null) return '';
+      if (typeof v === 'object') return JSON.stringify(v);
+      return v;
+    });
+  });
+  s.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  return json({ synced: rows.length });
+}
 // ROUTER
 function doGet(e){try{const a=e.parameter.action,m=e.parameter.module;
 switch(m){
@@ -42,10 +79,21 @@ default:return err('Módulo: '+m,404);}
 }catch(ex){return err(ex.message,500);}}
 
 function doPost(e){try{const body=JSON.parse(e.postData.contents);const a=body.action,m=body.module;
+// Sync genérico: qualquer módulo pode receber action="sync" para full-replace
+if(a==='sync'&&DB_SYNC_MODULES[m]){return gSync(DB_SYNC_MODULES[m],body.items);}
 switch(m){
 case 'app_state':return hAppStateP(a,body);case 'users':return hUsersP(a,body);case 'editais':return hEditaisP(a,body);case 'materias':return hMateriasP(a,body);case 'topicos':return hTopicosP(a,body);case 'aluno_editais':return hAEP(a,body);case 'planos':return hPlanosP(a,body);case 'progresso':return hProgP(a,body);case 'study_notes':return hNotesP(a,body);case 'gamificacao':return hGamP(a,body);case 'simulados':return hSimP(a,body);case 'questoes':return hQuestP(a,body);case 'tentativas':return hTentP(a,body);case 'batalhas':return hBatP(a,body);case 'batalha_participantes':return hBPP(a,body);case 'feedback_simulado':return hFBP(a,body);case 'resumo_comments':return hRCP(a,body);case 'resumo_additions':return hRAP(a,body);case 'logs':return hLogsP(a,body);
 default:return err('Módulo: '+m,404);}
 }catch(ex){return err(ex.message,500);}}
+
+// Mapeamento de módulos que suportam sync → sheet key
+const DB_SYNC_MODULES = {
+  users:'users', editais:'editais', planos:'planos', progresso:'progresso',
+  study_notes:'study_notes', gamificacao:'gamificacao', simulados:'simulados',
+  questoes:'questoes', tentativas:'tentativas', batalhas:'batalhas',
+  batalha_participantes:'batalha_participantes', feedback_simulado:'feedback_simulado',
+  resumo_comments:'resumo_comments', resumo_additions:'resumo_additions', logs:'logs',
+};
 
 // APP_STATE — JSON monolítico (substitui Supabase app_state)
 function hAppStateG(a,p){
