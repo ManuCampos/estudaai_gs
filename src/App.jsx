@@ -582,16 +582,28 @@ const progressoModule = {
     const item = storage.get().progresso.find(p => p.alunoId === alunoId && p.planoId === planoId && p.key === key);
     return item ? item.done : false;
   },
-  saveNote(alunoId, planoId, topicId, note) {
+  saveNote(alunoId, planoId, topicId, note, topicName) {
     storage.set(db => {
       const notes = db.studyNotes || [];
       const idx = notes.findIndex(n => n.alunoId === alunoId && n.planoId === planoId && n.topicId === topicId);
+      // Resolve topic name: use provided, or try to find from editais
+      let tName = topicName || "";
+      if (!tName) {
+        const plano = (db.planos||[]).find(p => p.id === planoId);
+        const edital = plano ? (db.editais||[]).find(e => e.id === plano.editalId) : null;
+        if (edital) {
+          for (const m of (edital.materias||[])) {
+            const t = (m.topicos||[]).find(t => t.id === topicId);
+            if (t) { tName = t.name; break; }
+          }
+        }
+      }
       if (idx >= 0) {
         const updated = [...notes];
-        updated[idx] = { ...updated[idx], note, updatedAt: new Date().toISOString() };
+        updated[idx] = { ...updated[idx], note, updatedAt: new Date().toISOString(), topicName: tName || updated[idx].topicName || "" };
         return { ...db, studyNotes: updated };
       }
-      return { ...db, studyNotes: [...notes, { alunoId, planoId, topicId, note, updatedAt: new Date().toISOString() }] };
+      return { ...db, studyNotes: [...notes, { alunoId, planoId, topicId, note, topicName: tName, updatedAt: new Date().toISOString() }] };
     });
   },
   getNote(alunoId, planoId, topicId) {
@@ -634,9 +646,10 @@ const progressoModule = {
       return {
         alunoId: n.alunoId, planoId: n.planoId, topicId: n.topicId,
         note: n.note, updatedAt: n.updatedAt,
-        topic: topic || { id: n.topicId, name: "Tópico removido" },
+        topic: topic || { id: n.topicId, name: n.topicName || "Tópico removido" },
         materia: materia || { id: "?", name: "Sem matéria", color: "#6b7280" },
         planoNome: edital?.name || plano?.id || "—",
+        topicRemovido: !topic && !!n.topicName,
       };
     });
   },
@@ -1375,9 +1388,9 @@ planosModule.regenerarDoZero = function(planoId, alunoId, novaRotina) {
 
 planosModule.reagendarTopico = function(planoId, dateKey, topicoId) {
   const plano = this.getById(planoId);
-  if (!plano) return;
+  if (!plano) return null;
   const topico = (plano.plan[dateKey]?.topicos || []).find(t => t.id === topicoId);
-  if (!topico) return;
+  if (!topico) return null;
   const diasEstudo = plano.rotina?.dias || [1,2,3,4,5];
   const start = new Date(dateKey + "T12:00:00");
   start.setDate(start.getDate() + 1);
@@ -1386,7 +1399,7 @@ planosModule.reagendarTopico = function(planoId, dateKey, topicoId) {
     if (diasEstudo.includes(start.getDay())) { nextDay = localDateKey(start); break; }
     start.setDate(start.getDate() + 1);
   }
-  if (!nextDay) return;
+  if (!nextDay) return null;
   storage.set(db => {
     const planos = db.planos.map(p => {
       if (p.id !== planoId) return p;
@@ -1407,6 +1420,7 @@ planosModule.reagendarTopico = function(planoId, dateKey, topicoId) {
     });
     return { ...db, planos };
   });
+  return nextDay; // retorna a data de destino
 };
 
 // ============================================================
@@ -2376,6 +2390,7 @@ function EstudarAgoraModal({ user, plano, onClose, onRefresh }) {
   const [showPrompt, setShowPrompt] = useState(false);
   const [promptTipo, setPromptTipo] = useState(null);
   const [promptCopiado, setPromptCopiado] = useState(false);
+  const [reagendToast, setReagendToast] = useState("");
   // Fluxo "Aula Já Estudada"
   const [jaEstudada, setJaEstudada] = useState(false);
   const [jaEstudadaDate, setJaEstudadaDate] = useState("");
@@ -2440,7 +2455,16 @@ function EstudarAgoraModal({ user, plano, onClose, onRefresh }) {
         progressoModule.saveDone(user.id, plano.id, progKey);
         setConcluidos(c=>c+1);
       } else {
-        planosModule.reagendarTopico(plano.id, today, currentTopic.id);
+        const novaData = planosModule.reagendarTopico(plano.id, today, currentTopic.id);
+        if (novaData) {
+          const d = new Date(novaData + "T00:00:00");
+          const dataFormatada = d.toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "2-digit" });
+          setReagendToast(`📅 "${currentTopic.name}" reagendada para ${dataFormatada}`);
+          setTimeout(() => setReagendToast(""), 3500);
+        } else {
+          setReagendToast("📅 Aula adicionada ao final do plano");
+          setTimeout(() => setReagendToast(""), 3500);
+        }
       }
     }
     avanca(); onRefresh(); setTick(t=>t+1);
@@ -2836,6 +2860,11 @@ Estruture assim:
             </button>
             {currentTopic._type === "lesson" && !jaEstudada && (
               <button className="btn-pular" onClick={handlePular}>📅 Pular e reagendar para depois</button>
+            )}
+            {reagendToast && (
+              <div style={{position:"absolute",bottom:80,left:"50%",transform:"translateX(-50%)",background:"var(--green)",color:"#fff",padding:"10px 18px",borderRadius:10,fontSize:12,fontWeight:600,boxShadow:"0 4px 16px rgba(0,0,0,0.3)",whiteSpace:"nowrap",zIndex:1200}}>
+                {reagendToast}
+              </div>
             )}
           </>
         )}
@@ -4350,6 +4379,21 @@ function AlunoDashboard({ user, setPage }) {
   const meta   = plano ? gamificacaoModule.getMetaSemanal(user.id, plano.id) : { feitas:0, meta:5 };
   const xpPct  = nivel.max===Infinity ? 100 : Math.round(((xp-nivel.min)/(nivel.max-nivel.min))*100);
   const metaPct= Math.min(100, meta.meta>0 ? Math.round(meta.feitas/meta.meta*100) : 0);
+
+  // BUG-7: Detectar streak quebrado e notificar
+  const [streakNotif, setStreakNotif] = useState(null);
+  useEffect(() => {
+    if (!plano) return;
+    const key = `estudaai_streak_${user.id}`;
+    const saved = JSON.parse(localStorage.getItem(key) || "{}");
+    if (streak === 0 && saved.lastStreak > 0 && !saved.notificado) {
+      setStreakNotif(saved.lastStreak);
+      localStorage.setItem(key, JSON.stringify({ ...saved, notificado: true }));
+    } else if (streak > 0) {
+      localStorage.setItem(key, JSON.stringify({ lastStreak: streak, notificado: false }));
+    }
+  }, [streak, plano]);
+
   function refresh() { setTick(t=>t+1); }
   return (
     <div>
@@ -4357,6 +4401,22 @@ function AlunoDashboard({ user, setPage }) {
         <div><h1>Olá, {user.name.split(" ")[0]}! 📚</h1><p>Continue de onde parou</p></div>
         {plano&&tdPend>0&&<button className="btn btn-green" style={{fontSize:15,padding:"12px 22px"}} onClick={()=>setEstudarOpen(true)}>▶ Estudar Agora</button>}
       </div>
+
+      {/* Notificação de streak quebrado */}
+      {streakNotif && (
+        <div style={{background:"var(--amber-d,#fef3c7)",border:"1.5px solid var(--amber,#f59e0b)",borderRadius:10,padding:"12px 16px",marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}>
+          <div style={{fontSize:13,color:"var(--t1)"}}>
+            😔 Seu streak de <strong>{streakNotif} dia{streakNotif>1?"s":""}</strong> foi interrompido. Que tal retomar hoje?
+          </div>
+          <button className="btn btn-ghost btn-xs" onClick={() => setStreakNotif(null)} style={{flexShrink:0}}>✕</button>
+        </div>
+      )}
+      {/* Streak recomeçou */}
+      {streak === 1 && tdDone > 0 && !streakNotif && (
+        <div style={{background:"var(--green-d,#dcfce7)",border:"1.5px solid var(--green,#22c55e)",borderRadius:10,padding:"12px 16px",marginBottom:16,fontSize:13,color:"var(--t1)"}}>
+          🔥 1 dia seguido — você recomeçou! Continue assim!
+        </div>
+      )}
 
       {/* Gamification strip */}
       {plano&&(
@@ -4612,7 +4672,25 @@ function AlunoPlano({ user, refresh }) {
                 <span style={{fontWeight:900,fontSize:14}}>📅 Continuar de onde parei</span>
                 <span style={{fontSize:11,opacity:.8,fontWeight:400}}>Reagenda apenas as aulas não feitas a partir de hoje. Mantém todo o progresso e notas.</span>
               </button>
-              <button className="btn" style={{background:"var(--s3)",border:"1.5px solid var(--b2)",color:"var(--t1)",textAlign:"left",padding:"16px 18px",borderRadius:12,height:"auto",flexDirection:"column",alignItems:"flex-start",gap:4}} onClick={()=>{planosModule.regenerarDoZero(plano.id,user.id,plano.rotina);setShowRegerar(false);refresh();}}>
+              <button className="btn" style={{background:"var(--s3)",border:"1.5px solid var(--b2)",color:"var(--t1)",textAlign:"left",padding:"16px 18px",borderRadius:12,height:"auto",flexDirection:"column",alignItems:"flex-start",gap:4}} onClick={async ()=>{
+                // BUG-3: Verificar aulas concluídas na semana corrente que serão afetadas
+                const todayKey = localDateKey(today);
+                const mon = new Date(today); mon.setDate(today.getDate() - today.getDay() + 1);
+                let aulasAfetadas = 0;
+                for (let i = 0; i < 7; i++) {
+                  const d = new Date(mon); d.setDate(mon.getDate() + i);
+                  const dk = localDateKey(d);
+                  if (dk < todayKey) continue; // só conta de hoje em diante
+                  const dd = plano.plan?.[dk] || { topicos:[], reviews:[] };
+                  dd.topicos.forEach(t => { if (progressoModule.isDone(user.id, plano.id, `${dk}-${t.id}`)) aulasAfetadas++; });
+                }
+                const avisoExtra = aulasAfetadas > 0
+                  ? `\n\n⚠️ Atenção: ${aulasAfetadas} aula(s) concluída(s) nesta semana serão desmarcadas. O histórico de semanas anteriores será preservado.`
+                  : "";
+                const ok = await confirmar({ titulo: "Regenerar plano do zero?", mensagem: `O plano será recriado completamente. O progresso de semanas anteriores é mantido no histórico.${avisoExtra}`, tipo: "destrutivo", confirmLabel: "Regenerar" });
+                if (!ok) return;
+                planosModule.regenerarDoZero(plano.id,user.id,plano.rotina);setShowRegerar(false);refresh();
+              }}>
                 <span style={{fontWeight:900,fontSize:14}}>🔁 Regenerar do zero</span>
                 <span style={{fontSize:11,opacity:.7,fontWeight:400}}>Recria o plano completo. O progresso já registrado é mantido no histórico.</span>
               </button>
@@ -4621,7 +4699,7 @@ function AlunoPlano({ user, refresh }) {
           </div>
         </div>
       )}
-      <div className="ph"><div><h1>Meu Plano</h1><p>{edital?.name}</p></div><div className="row" style={{gap:8}}><button className="btn btn-green btn-sm" style={{fontSize:13}} onClick={()=>setShowEstudar2(true)}>▶ Estudar Agora</button><button className="btn btn-ghost btn-sm" onClick={()=>setShowRegerar(true)}>🔄 Regerar</button><button className="btn btn-red btn-sm" onClick={()=>{if(window.confirm("Excluir o plano? Todo o progresso será perdido.")){ planosModule.delete(plano.id);refresh();}}}>🗑 Excluir</button></div></div>
+      <div className="ph"><div><h1>Meu Plano</h1><p>{edital?.name}</p></div><div className="row" style={{gap:8}}><button className="btn btn-green btn-sm" style={{fontSize:13}} onClick={()=>setShowEstudar2(true)}>▶ Estudar Agora</button><button className="btn btn-ghost btn-sm" onClick={()=>setShowRegerar(true)}>🔄 Regerar</button><button className="btn btn-red btn-sm" onClick={async ()=>{if(await confirmar({ titulo:"Excluir plano de estudos?", mensagem:"Você perderá todo o cronograma atual. O histórico de aulas já concluídas será mantido no seu progresso.", tipo:"destrutivo", confirmLabel:"Excluir" })){ planosModule.delete(plano.id);refresh();}}}>🗑 Excluir</button></div></div>
       <div className="row mb4">
         <button className="btn btn-ghost btn-icon btn-sm" onClick={()=>setWeekOffset(w=>w-1)}>◀</button>
         <span style={{fontFamily:"Cabinet Grotesk",fontWeight:700,minWidth:200,textAlign:"center"}}>{wLabel}</span>
@@ -5089,7 +5167,7 @@ xmlns="http://www.w3.org/TR/REC-html40">${html.replace(/<!DOCTYPE.*?>/i, "").rep
                 <div key={r.topicId+"::"+r.planoId} style={{padding:"10px 0",borderBottom:"1px solid var(--b1)"}}>
                   <div className="row-b" style={{alignItems:"flex-start",gap:8}}>
                     <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontWeight:700,fontSize:13,color:"var(--t1)",marginBottom:3}}>{r.topic.name}</div>
+                      <div style={{fontWeight:700,fontSize:13,color:"var(--t1)",marginBottom:3}}>{r.topic.name}{r.topicRemovido && <span style={{fontSize:10,color:"var(--amber)",marginLeft:6,fontWeight:400}}>📌 Fora do edital atual</span>}</div>
                       <div style={{fontSize:11,color:"var(--t3)",marginBottom:6}}>Atualizado em {data}</div>
                       {!isOpen ? (
                         <div style={{fontSize:12,color:"var(--t2)",lineHeight:1.55,whiteSpace:"pre-wrap"}}>
@@ -5420,8 +5498,27 @@ function AdminDebug() {
   const [simDate, setSimDate] = useState(localDateKey(today));
   const [selectedAluno, setSelectedAluno] = useState("");
   const [dayOffset, setDayOffset] = useState(0);
+  const [sandbox, setSandbox] = useState(null); // cópia isolada do progresso
+  const [sandboxNotes, setSandboxNotes] = useState([]);
+  const [tick, setTick] = useState(0);
   const alunos = usersModule.getAlunos();
   const planos = storage.get().planos;
+
+  // Sandbox: cópia isolada dos dados reais
+  const initSandbox = (alunoId) => {
+    const db = storage.get();
+    const pl = db.planos.find(p => p.alunoId === alunoId);
+    if (pl) {
+      setSandbox(JSON.parse(JSON.stringify((db.progresso||[]).filter(p => p.alunoId === alunoId && p.planoId === pl.id))));
+      setSandboxNotes(JSON.parse(JSON.stringify((db.studyNotes||[]).filter(n => n.alunoId === alunoId))));
+    } else { setSandbox([]); setSandboxNotes([]); }
+  };
+  const handleSelectAluno = (id) => { setSelectedAluno(id); if (id) initSandbox(id); else { setSandbox(null); setSandboxNotes([]); } };
+  const sbIsDone = (key) => (sandbox||[]).some(p => p.key === key && p.done);
+  const sbMarkDone = (planoId, key) => { setSandbox(prev => { if (prev.find(p=>p.key===key)) return prev.map(p=>p.key===key?{...p,done:true}:p); return [...prev,{alunoId:selectedAluno,planoId,key,done:true}]; }); setTick(t=>t+1); };
+  const sbRemoveDone = (planoId, key) => { setSandbox(prev => prev.filter(p => p.key !== key)); setTick(t=>t+1); };
+  const sbResetAll = (planoId) => { setSandbox(prev => prev.filter(p => p.planoId !== planoId)); setTick(t=>t+1); };
+  const sbAddNote = (planoId, topicId, text) => { setSandboxNotes(prev => { const ex=prev.find(n=>n.planoId===planoId&&n.topicId===topicId); if(ex) return prev.map(n=>(n.planoId===planoId&&n.topicId===topicId)?{...n,note:text,updatedAt:new Date().toISOString()}:n); return [...prev,{alunoId:selectedAluno,planoId,topicId,note:text,updatedAt:new Date().toISOString()}]; }); setTick(t=>t+1); };
 
   // Derived simulated date from manual offset
   const baseDate = new Date(simDate + "T00:00:00");
@@ -5434,12 +5531,11 @@ function AdminDebug() {
   const edital = plano ? editaisModule.getById(plano.editalId) : null;
   const dayData = plano?.plan?.[simKey] || { topicos:[], reviews:[] };
 
-  // Compute cumulative stats up to simKey
+  // Compute cumulative stats using sandbox
   function statsUpTo(key) {
-    if (!plano) return null;
-    const prog = storage.get().progresso.filter(p => p.alunoId === selectedAluno && p.planoId === plano.id && p.done);
+    if (!plano || !sandbox) return null;
     const doneIds = new Set(
-      prog.filter(p => { const dk = p.key.split("-").slice(0,3).join("-"); return dk <= key && !p.key.endsWith("-rev"); })
+      sandbox.filter(p => p.done && !p.key.endsWith("-rev"))
           .map(p => p.key.substring(11))
     );
     const aulasFeitas = doneIds.size;
@@ -5450,7 +5546,7 @@ function AdminDebug() {
   }
 
   const stats = statsUpTo(simKey);
-  const xp = plano ? gamificacaoModule.calcXP(selectedAluno, plano.id) : 0;
+  const xp = sandbox ? sandbox.filter(p => p.done).length * 10 : 0;
   const nivel = gamificacaoModule.getNivel(xp);
 
   // Week view centered on simKey
@@ -5469,8 +5565,12 @@ function AdminDebug() {
   return (
     <div>
       <div className="ph">
-        <div><h1>🔧 Debug — Simulador de Tempo</h1><p>Simule datas e veja o comportamento do plano</p></div>
+        <div><h1>🔧 Debug — Simulador de Tempo</h1><p>Sandbox isolado — não afeta dados reais</p></div>
         <button className="btn btn-ghost btn-sm" onClick={resetDate}>🔄 Voltar ao hoje</button>
+      </div>
+
+      <div style={{background:"var(--amber-d,#fef3c7)",border:"1.5px solid var(--amber,#f59e0b)",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:12,color:"var(--amber,#92400e)"}}>
+        ⚠️ <strong>Modo Sandbox:</strong> Todas as ações aqui operam numa cópia isolada dos dados. Nenhuma alteração afeta o ambiente real. Ao sair desta aba, as simulações são descartadas.
       </div>
 
       {/* Controls */}
@@ -5479,7 +5579,7 @@ function AdminDebug() {
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:16}}>
           <div className="form-group" style={{margin:0}}>
             <label className="lbl">Aluno</label>
-            <select className="inp" value={selectedAluno} onChange={e=>setSelectedAluno(e.target.value)}>
+            <select className="inp" value={selectedAluno} onChange={e=>handleSelectAluno(e.target.value)}>
               <option value="">— selecione —</option>
               {alunos.map(a=><option key={a.id} value={a.id}>{a.name}{planos.some(p=>p.alunoId===a.id)?"":" (sem plano)"}</option>)}
             </select>
@@ -5529,7 +5629,7 @@ function AdminDebug() {
                       <div style={{fontSize:11,fontWeight:700,color:"var(--t3)",textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Aulas ({dayData.topicos.length})</div>
                       {dayData.topicos.map((t,i)=>{
                         const key=`${simKey}-${t.id}`;
-                        const done=progressoModule.isDone(selectedAluno,plano.id,key);
+                        const done=sbIsDone(key);
                         return <div key={i} className={`topic-row ${done?"done":""}`}><div className="dot-c" style={{background:t.materiaColor}}/><span className="tr-name">{t.name}</span><span className="tr-tag">{t.materiaName}</span>{done&&<span className="badge bg" style={{fontSize:10}}>✓</span>}</div>;
                       })}
                     </div>
@@ -5539,7 +5639,7 @@ function AdminDebug() {
                       <div className="rev-lbl">Revisões ({dayData.reviews.length})</div>
                       {dayData.reviews.map((r,i)=>{
                         const key=`${simKey}-${r.id}-rev`;
-                        const done=progressoModule.isDone(selectedAluno,plano.id,key);
+                        const done=sbIsDone(key);
                         return <div key={i} className={`topic-row ${done?"done":""}`}><div className="dot-c" style={{background:r.materiaColor}}/><span className="tr-name">{r.name}</span><span className="tr-tag">🕐 {r.reviewInterval}d</span>{done&&<span className="badge bg" style={{fontSize:10}}>✓</span>}</div>;
                       })}
                     </div>
@@ -5587,110 +5687,98 @@ function AdminDebug() {
             <PBar pct={stats?.pct||0} color="var(--green)"/>
           </div>
 
-          {/* Ações de simulação */}
+          {/* Ações de simulação (sandbox) */}
           <div className="card" style={{marginTop:16}}>
-            <div className="card-title">⚡ Ações de Simulação</div>
-            <p style={{fontSize:11,color:"var(--t3)",margin:"0 0 12px"}}>Simule cenários para testar o comportamento do sistema.</p>
+            <div className="card-title">⚡ Ações de Simulação (Sandbox)</div>
+            <p style={{fontSize:11,color:"var(--t3)",margin:"0 0 12px"}}>Estas ações operam apenas na cópia local. Nada é salvo no banco real.</p>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
-              <button className="btn btn-green btn-sm" onClick={() => {
-                // Marcar todas as aulas do dia simulado como concluídas
+              <button className="btn btn-green btn-sm" onClick={async () => {
                 const dk = simKey;
                 const dd = plano.plan[dk] || { topicos:[], reviews:[] };
-                dd.topicos.forEach(t => { progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${t.id}`); });
-                dd.reviews.forEach(r => { progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${r.id}-rev`); });
-                alert(`✓ ${dd.topicos.length} aulas + ${dd.reviews.length} revisões marcadas como concluídas em ${dk}`);
+                dd.topicos.forEach(t => sbMarkDone(plano.id, `${dk}-${t.id}`));
+                dd.reviews.forEach(r => sbMarkDone(plano.id, `${dk}-${r.id}-rev`));
+                await alertar({ titulo: "Dia concluído", mensagem: `✓ [Sandbox] ${dd.topicos.length} aulas + ${dd.reviews.length} revisões concluídas em ${dk}` });
               }}>
-                ✅ Concluir dia {simDt.toLocaleDateString("pt-BR",{day:"2-digit",month:"2-digit"})}
+                ✅ Concluir dia
               </button>
-              <button className="btn btn-blue btn-sm" onClick={() => {
-                // Concluir próximos N dias
-                const n = parseInt(prompt("Quantos dias a partir da data simulada deseja concluir?", "7"));
+              <button className="btn btn-blue btn-sm" onClick={async () => {
+                const n = parseInt(prompt("Quantos dias a partir da data simulada?", "7"));
                 if (!n || isNaN(n)) return;
                 let count = 0;
                 for (let i = 0; i < n; i++) {
                   const d = new Date(simDt); d.setDate(simDt.getDate() + i);
                   const dk = localDateKey(d);
                   const dd = plano.plan[dk] || { topicos:[], reviews:[] };
-                  dd.topicos.forEach(t => { progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${t.id}`); count++; });
-                  dd.reviews.forEach(r => { progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${r.id}-rev`); count++; });
+                  dd.topicos.forEach(t => { sbMarkDone(plano.id, `${dk}-${t.id}`); count++; });
+                  dd.reviews.forEach(r => { sbMarkDone(plano.id, `${dk}-${r.id}-rev`); count++; });
                 }
-                alert(`✓ ${count} itens concluídos em ${n} dias`);
+                await alertar({ titulo: "Dias concluídos", mensagem: `✓ [Sandbox] ${count} itens concluídos em ${n} dias` });
               }}>
                 📅 Concluir próximos N dias
               </button>
-              <button className="btn btn-ghost btn-sm" style={{color:"var(--amber)"}} onClick={() => {
-                // Simular pular dias (não estudar) — remove progresso dos próximos N dias
-                const n = parseInt(prompt("Quantos dias deseja simular como NÃO estudados (remove progresso)?", "3"));
+              <button className="btn btn-ghost btn-sm" style={{color:"var(--amber)"}} onClick={async () => {
+                const n = parseInt(prompt("Quantos dias remover progresso?", "3"));
                 if (!n || isNaN(n)) return;
                 let count = 0;
                 for (let i = 0; i < n; i++) {
                   const d = new Date(simDt); d.setDate(simDt.getDate() + i);
                   const dk = localDateKey(d);
                   const dd = plano.plan[dk] || { topicos:[], reviews:[] };
-                  dd.topicos.forEach(t => {
-                    const key = `${dk}-${t.id}`;
-                    storage.set(db => ({ ...db, progresso: (db.progresso||[]).filter(p => !(p.alunoId===selectedAluno && p.planoId===plano.id && p.key===key)) }));
-                    count++;
-                  });
-                  dd.reviews.forEach(r => {
-                    const key = `${dk}-${r.id}-rev`;
-                    storage.set(db => ({ ...db, progresso: (db.progresso||[]).filter(p => !(p.alunoId===selectedAluno && p.planoId===plano.id && p.key===key)) }));
-                    count++;
-                  });
+                  dd.topicos.forEach(t => { sbRemoveDone(plano.id, `${dk}-${t.id}`); count++; });
+                  dd.reviews.forEach(r => { sbRemoveDone(plano.id, `${dk}-${r.id}-rev`); count++; });
                 }
-                alert(`✓ Progresso removido de ${count} itens em ${n} dias (simulando não estudar)`);
+                await alertar({ titulo: "Progresso removido", mensagem: `✓ [Sandbox] Progresso removido de ${count} itens em ${n} dias` });
               }}>
                 ⏭️ Simular não estudar N dias
               </button>
-              <button className="btn btn-ghost btn-sm" style={{color:"var(--purple)"}} onClick={() => {
-                // Concluir apenas metade das aulas do dia (simula estudo parcial)
+              <button className="btn btn-ghost btn-sm" style={{color:"var(--purple)"}} onClick={async () => {
                 const dk = simKey;
                 const dd = plano.plan[dk] || { topicos:[], reviews:[] };
                 const half = Math.ceil(dd.topicos.length / 2);
-                dd.topicos.slice(0, half).forEach(t => { progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${t.id}`); });
-                alert(`✓ ${half} de ${dd.topicos.length} aulas concluídas (estudo parcial)`);
+                dd.topicos.slice(0, half).forEach(t => sbMarkDone(plano.id, `${dk}-${t.id}`));
+                await alertar({ titulo: "Estudo parcial", mensagem: `✓ [Sandbox] ${half} de ${dd.topicos.length} aulas concluídas (parcial)` });
               }}>
-                ½ Estudo parcial do dia
+                ½ Estudo parcial
               </button>
             </div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <button className="btn btn-ghost btn-sm" style={{color:"var(--red)"}} onClick={() => {
-                // Limpar todo o progresso do aluno
-                if (!confirm(`Tem certeza? Isso vai APAGAR todo o progresso de ${aluno.name}.`)) return;
-                storage.set(db => ({ ...db, progresso: (db.progresso||[]).filter(p => !(p.alunoId===selectedAluno && p.planoId===plano.id)) }));
-                alert("✓ Todo o progresso foi resetado.");
+              <button className="btn btn-ghost btn-sm" style={{color:"var(--red)"}} onClick={async () => {
+                if (!await confirmar({ titulo: "[Sandbox] Resetar progresso?", mensagem: "Todo o progresso simulado será apagado. Isso não afeta dados reais.", tipo: "destrutivo", confirmLabel: "Resetar" })) return;
+                sbResetAll(plano.id);
+                await alertar({ titulo: "Pronto", mensagem: "✓ [Sandbox] Progresso resetado." });
               }}>
-                🗑️ Resetar todo progresso
+                🗑️ Resetar progresso
               </button>
-              <button className="btn btn-ghost btn-sm" onClick={() => {
-                // Concluir todas as aulas de uma matéria específica
+              <button className="btn btn-ghost btn-sm" onClick={async () => {
                 const materias = edital?.materias || [];
                 const nomes = materias.map((m,i) => `${i+1}. ${m.name}`).join("\n");
-                const idx = parseInt(prompt(`Qual matéria concluir inteira?\n\n${nomes}\n\nDigite o número:`, "1"));
+                const idx = parseInt(prompt(`Qual matéria concluir?\n\n${nomes}\n\nNúmero:`, "1"));
                 if (!idx || isNaN(idx) || idx < 1 || idx > materias.length) return;
                 const mat = materias[idx-1];
                 const topicIds = new Set((mat.topicos||[]).map(t=>t.id));
                 let count = 0;
                 Object.entries(plano.plan).forEach(([dk, dd]) => {
-                  dd.topicos.filter(t => topicIds.has(t.id)).forEach(t => {
-                    progressoModule.saveDone(selectedAluno, plano.id, `${dk}-${t.id}`);
-                    count++;
-                  });
+                  dd.topicos.filter(t => topicIds.has(t.id)).forEach(t => { sbMarkDone(plano.id, `${dk}-${t.id}`); count++; });
                 });
-                alert(`✓ ${count} aulas de "${mat.name}" marcadas como concluídas`);
+                await alertar({ titulo: "Matéria concluída", mensagem: `✓ [Sandbox] ${count} aulas de "${mat.name}" concluídas` });
               }}>
                 📚 Concluir matéria inteira
               </button>
-              <button className="btn btn-ghost btn-sm" onClick={() => {
-                // Gerar resumos fake para tópicos do dia
+              <button className="btn btn-ghost btn-sm" onClick={async () => {
                 const dk = simKey;
                 const dd = plano.plan[dk] || { topicos:[], reviews:[] };
                 dd.topicos.forEach(t => {
-                  progressoModule.saveNote(selectedAluno, plano.id, t.id, `[Resumo simulado] ${t.name}\n\nConteúdo de teste gerado pelo módulo de debug em ${new Date().toLocaleString("pt-BR")}.`);
+                  sbAddNote(plano.id, t.id, `[Resumo simulado] ${t.name}\n\nConteúdo de teste gerado em ${new Date().toLocaleString("pt-BR")}.`);
                 });
-                alert(`✓ ${dd.topicos.length} resumos simulados criados para o dia ${dk}`);
+                await alertar({ titulo: "Resumos criados", mensagem: `✓ [Sandbox] ${dd.topicos.length} resumos simulados criados` });
               }}>
-                📝 Gerar resumos fake do dia
+                📝 Gerar resumos fake
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={async () => {
+                initSandbox(selectedAluno);
+                await alertar({ titulo: "Sandbox recarregado", mensagem: "✓ Sandbox recarregado com dados reais atuais." });
+              }}>
+                🔄 Recarregar do real
               </button>
             </div>
           </div>
@@ -6110,7 +6198,7 @@ function ResolverSimulado({ tentativaId, onVoltar }) {
           </button>
           <button
             onClick={() => {
-              if (window.confirm("Finalizar o simulado agora? As questoes nao respondidas contarao como em branco.")) {
+              if (await confirmar({ titulo: "Finalizar simulado?", mensagem: "As questões não respondidas contarão como em branco.", tipo: "destrutivo", confirmLabel: "Finalizar" })) {
                 tentativasModule.finalizar(tentativaId, tempoDecorridoSegundos);
                 onVoltar();
               }
@@ -7132,7 +7220,7 @@ function CoachSimulados({ user, refresh }) {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (window.confirm(`Tem certeza que deseja deletar o simulado "${sim.nome}"? Todas as questões e tentativas serão removidas.`)) {
+                          if (await confirmar({ titulo: "Deletar simulado?", mensagem: `Tem certeza que deseja deletar o simulado "${sim.nome}"? Todas as questões e tentativas serão removidas.`, tipo: "destrutivo" })) {
                             simuladosModule.delete(sim.id);
                             refresh?.();
                           }
@@ -7662,7 +7750,7 @@ function ModalGerenciarSimulado({ simuladoId, coachId, onClose }) {
                     )}
                     <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
                       <button
-                        onClick={() => { if (window.confirm("Deletar?")) { questoesModule.delete(questaoAtual.id); setQuestaoIdx(prev => Math.max(0, prev - 1)); setTick(t=>t+1); } }}
+                        onClick={async () => { if (await confirmar({ titulo: "Deletar questão?", mensagem: "Esta ação não pode ser desfeita.", tipo: "destrutivo" })) { questoesModule.delete(questaoAtual.id); setQuestaoIdx(prev => Math.max(0, prev - 1)); setTick(t=>t+1); } }}
                         style={{ padding: "6px 12px", borderRadius: 6, border: "none", background: "var(--red)", color: "white", fontSize: 11, fontWeight: 600, cursor: "pointer" }}
                       >Deletar Questao</button>
                     </div>
@@ -8548,7 +8636,7 @@ function CoachBatalha({ user, refresh }) {
                       Encerrar
                     </button>
                   )}
-                  <button onClick={() => { if(window.confirm("Deletar batalha?")) { batalhasModule.delete(b.id); reload(); } }} style={{ padding:"8px 10px", borderRadius:8, border:"none", background:"rgba(239,68,68,.1)", color:"var(--red)", fontSize:12, cursor:"pointer" }}>
+                  <button onClick={async () => { if(await confirmar({ titulo: "Deletar batalha?", mensagem: "A batalha e todos os participantes serão removidos.", tipo: "destrutivo" })) { batalhasModule.delete(b.id); reload(); } }} style={{ padding:"8px 10px", borderRadius:8, border:"none", background:"rgba(239,68,68,.1)", color:"var(--red)", fontSize:12, cursor:"pointer" }}>
                     Excluir
                   </button>
                 </div>
@@ -8737,6 +8825,7 @@ function ModalRankingBatalha({ batalhaId, onClose }) {
 // ============================================================
 function GeradorDePrompt() {
   const [tema, setTema] = useState("");
+  const [temaErro, setTemaErro] = useState(false);
   const [materia, setMateria] = useState("");
   const [modo, setModo] = useState("apostila-completa");
   const [nivel, setNivel] = useState("intermediario");
@@ -8745,8 +8834,15 @@ function GeradorDePrompt() {
   const [especialidade, setEspecialidade] = useState("concursos públicos");
   const [foco, setFoco] = useState("Tribunais de Contas (Banca CESPE)");
   const [concursoAlvo, setConcursoAlvo] = useState("cebraspe tcerj");
+  const [perfilProf, setPerfilProf] = useState("professor-concurso"); // perfil do professor
   const [promptGerado, setPromptGerado] = useState("");
   const [copied, setCopied] = useState(false);
+
+  const PERFIS_PROF = [
+    { id: "professor-concurso", label: "Professor de Concurso", desc: "Didático, foco em aprovação, linguagem acessível" },
+    { id: "examinador", label: "Examinador de Banca", desc: "Visão de quem elabora a prova, foco em pegadinhas e distratores" },
+    { id: "professor-alto-nivel", label: "Professor de Alto Nível", desc: "Aprofundamento máximo, doutrina e jurisprudência avançada" },
+  ];
 
   const MODOS = [
     { id: "apostila-completa",    icon: "📘", label: "Apostila Completa (DOCX)", desc: "Material premium em 8 seções — visão geral, teoria, resumo, pegadinhas, 25+ questões, CESPE C/E, dicas e decoreba." },
@@ -8766,7 +8862,8 @@ function GeradorDePrompt() {
     { id: "avancado", label: "Avançado", desc: "Quero pegadinhas e nível alta cobrança" },
   ];
 
-  const BASE = "Você é um professor especialista em concursos públicos de alto nível, com foco em provas de Tribunais de Contas, banca CESPE/Cebraspe, e especialista em didática para aprovação.";
+  const perfilLabel = PERFIS_PROF.find(p => p.id === perfilProf)?.label || "Professor de Concurso";
+  const BASE = `Você é um ${perfilLabel} especialista em ${(especialidade||"").trim()||"concursos públicos"} de alto nível, com foco em provas de ${(foco||"").trim()||"Tribunais de Contas (Banca CESPE)"}, banca ${(banca||"").trim()||"CESPE/Cebraspe"}, e especialista em didática para aprovação.`;
 
   // Apostila completa: prompt-padrão de alto nível para gerar material em DOCX.
   // Os campos especialidade / foco / concursoAlvo são editáveis pelo aluno na UI.
@@ -8776,7 +8873,9 @@ function GeradorDePrompt() {
     const alvoTxt  = (concursoAlvo || "").trim() || "cebraspe tcerj";
     const materiaTxt = (materiaArg || "").trim();
     const materiaLine = materiaTxt ? `\nMatéria: ${materiaTxt}` : "";
-    return `Você é um professor especialista em ${especTxt} de alto nível, com foco em provas de ${focoTxt} e um especialista em produção de conteúdo em formato docx
+    const bancaTxt = (banca || "").trim() || "CESPE/Cebraspe";
+    return `Você é um ${perfilLabel} especialista em ${especTxt} de alto nível, com foco em provas de ${focoTxt} e um especialista em produção de conteúdo em formato docx.
+Banca: ${bancaTxt}
 Sua tarefa é criar um MATERIAL COMPLETO em formato de apostila para estudo, com linguagem clara, didática e aprofundada, sobre o seguinte tema em formato docx pronto para download para ${alvoTxt} com o seguinte tema:
 ${temaArg}${materiaLine}
 O material deve seguir EXATAMENTE a estrutura abaixo:
@@ -8861,8 +8960,11 @@ Agora gere o conteúdo completo.`;
   }
 
   function handleGerar() {
-    if (!tema.trim()) { alert("Informe o tema da aula."); return; }
+    if (!tema.trim()) { setTemaErro(true); return; }
+    setTemaErro(false);
 
+    // Defer heavy prompt building to avoid blocking the main thread (INP)
+    setTimeout(() => {
     // Modo "Apostila Completa" usa o prompt-padrão completo, sem cabeçalho extra.
     if (modo === "apostila-completa") {
       const prompt = buildApostilaCompleta(tema.trim(), materia);
@@ -8886,74 +8988,145 @@ Agora gere o conteúdo completo.`;
       case "estudo-padrao":
         instrucao = `Produza uma aula completa e didática sobre "${tema}".
 A aula deve conter:
-1. Conceito-chave em 3 linhas
-2. Explicação aprofundada com exemplos práticos
-3. Fundamentação legal/normativa quando aplicável (citar artigos)
-4. 5 questões estilo CESPE no final, com gabarito comentado
-5. Resumo final com os tópicos mais importantes para a prova`;
+1. Conceito-chave em 3 linhas (definição formal e objetiva)
+2. Explicação aprofundada com exemplos práticos e situações reais de prova
+3. Fundamentação legal/normativa (citar artigos da CF, leis, decretos)
+4. Jurisprudência relevante (STF, STJ, TCU) quando aplicável
+5. Pegadinhas e armadilhas que a banca costuma usar neste tema
+6. 10 questões estilo ${(banca||"").trim()||"CESPE"} no final:
+   - PRIMEIRO: mostre todas as 10 questões SEM gabarito
+   - DEPOIS: seção "GABARITO COMENTADO" com cada questão repetida + gabarito + explicação detalhada de cada alternativa
+7. Resumo final com os 5 tópicos mais importantes para a prova
+8. Seção "DECOREBA" com prazos, números e dados que devem ser memorizados`;
         break;
       case "revisao-rapida":
         instrucao = `Faça uma revisão RÁPIDA e DIRETA sobre "${tema}".
-Apenas tópicos essenciais em formato de bullets, sem rodeios.
-Foque no que cai em prova. Máximo 1 página.`;
+Estrutura obrigatória:
+1. CONCEITOS-CHAVE: bullets objetivos com as definições essenciais
+2. O QUE MAIS CAI: os 5 pontos mais cobrados pela banca ${(banca||"").trim()||"CESPE"}
+3. PEGADINHAS: as 3 armadilhas mais comuns neste tema
+4. DIFERENÇAS IMPORTANTES: comparações que confundem candidatos
+5. DECOREBA: prazos, números, exceções que precisam ser memorizados
+6. FRASE-RESUMO: uma frase que sintetiza o tema inteiro
+
+Seja direto, sem rodeios. Máximo 1 página. Foque APENAS no que cai em prova.`;
         break;
       case "questoes-comentadas":
-        instrucao = `Crie 10 questões estilo CESPE/Cebraspe sobre "${tema}".
-Para cada questão:
-- Enunciado em formato C/E (Certo/Errado)
-- Gabarito + comentário explicando POR QUE está certo ou errado
-- Indicar a pegadinha quando houver
-- Citar a base legal/normativa`;
+        instrucao = `Crie 20 questões sobre "${tema}" no estilo da banca ${(banca||"").trim()||"CESPE/Cebraspe"}.
+
+Distribuição:
+- 10 questões em formato C/E (Certo/Errado)
+- 5 questões de múltipla escolha (A a E) nível médio
+- 5 questões de múltipla escolha (A a E) nível difícil
+
+⚠️ ORDEM OBRIGATÓRIA:
+1. PRIMEIRO: mostre TODAS as 20 questões SEM gabarito, SEM comentários, numeradas.
+2. DEPOIS: seção separada "GABARITO COMENTADO" com cada questão repetida + gabarito + explicação detalhada:
+   - Por que a alternativa correta está certa (com fundamentação legal)
+   - Por que cada alternativa errada está errada
+   - Indicação da pegadinha quando houver
+   - Base legal/normativa/jurisprudencial
+
+Nunca misture pergunta e resposta no mesmo bloco.`;
         break;
       case "mapa-mental":
-        instrucao = `Construa um mapa mental textual do tema "${tema}".
-Use estrutura hierárquica com indentação:
-- Tema central
-  - Conceito 1
-    - Subconceito 1.1
-    - Subconceito 1.2
-  - Conceito 2
-    - ...
-Inclua relações entre os conceitos.`;
+        instrucao = `Construa um mapa mental textual COMPLETO do tema "${tema}".
+Use estrutura hierárquica com indentação clara:
+
+TEMA CENTRAL: ${tema}
+├── Conceito 1
+│   ├── Subconceito 1.1
+│   │   └── Detalhe / Exceção
+│   └── Subconceito 1.2
+├── Conceito 2
+│   ├── ...
+└── Conceito N
+
+Requisitos:
+- Inclua TODOS os conceitos relevantes para prova
+- Marque com ⚠️ os pontos que são pegadinha
+- Marque com ⭐ os pontos mais cobrados
+- Inclua fundamentação legal entre parênteses (Art. X, Lei Y)
+- No final, adicione seção "CONEXÕES ENTRE CONCEITOS" mostrando relações cruzadas
+- Adicione seção "TOP 5 COBRANÇAS EM PROVA" com os itens mais frequentes`;
         break;
       case "resumo":
-        instrucao = `Faça um resumo completo e didático sobre "${tema}".
+        instrucao = `Faça um resumo completo e didático sobre "${tema}" para concurso ${(concursoAlvo||"").trim()||"público"}.
 O resumo deve:
-1. Ser claro e objetivo
-2. Ter no máximo 2 páginas
-3. Destacar os pontos mais cobrados em prova
-4. Usar negrito para conceitos-chave
-5. Incluir no final um "TOP 5 do que mais cai"`;
+1. Começar com DEFINIÇÃO FORMAL (1-2 linhas)
+2. CLASSIFICAÇÕES E ESPÉCIES — listar todas com breve explicação
+3. PRINCÍPIOS APLICÁVEIS — enumerar e explicar cada um
+4. EXCEÇÕES E CASOS ESPECIAIS — o que foge da regra geral
+5. FUNDAMENTAÇÃO LEGAL — artigos da CF, leis, decretos relevantes
+6. JURISPRUDÊNCIA — súmulas e decisões importantes
+7. QUADRO-RESUMO — tabela comparativa quando aplicável
+8. TOP 5 DO QUE MAIS CAI — os pontos mais cobrados pela banca ${(banca||"").trim()||"CESPE"}
+9. PEGADINHAS — as 3 armadilhas mais comuns
+10. DECOREBA — prazos, números, dados para memorizar
+
+Use negrito para conceitos-chave. Máximo 3 páginas.`;
         break;
       case "macetes":
-        instrucao = `Liste os MACETES, MNEMÔNICOS e PEGADINHAS sobre "${tema}".
-Foque em:
-- Truques para memorização rápida
-- Pegadinhas comuns que a banca usa
-- Diferenças sutis que confundem candidatos
-- Frases-chave que indicam resposta correta/errada`;
+        instrucao = `Liste os MACETES, MNEMÔNICOS e PEGADINHAS sobre "${tema}" para a banca ${(banca||"").trim()||"CESPE"}.
+
+Estrutura:
+1. MNEMÔNICOS — crie frases/acrônimos para memorizar listas e classificações
+2. MACETES DE PROVA — truques para identificar a resposta correta/errada rapidamente
+3. PEGADINHAS DA BANCA — as armadilhas mais usadas pela ${(banca||"").trim()||"CESPE"} neste tema:
+   - Mostre o enunciado típico da pegadinha
+   - Explique por que o candidato erra
+   - Dê a resposta correta com fundamentação
+4. PALAVRAS-CHAVE — termos que indicam resposta CERTA vs ERRADA
+   - Ex: "sempre", "nunca", "exclusivamente" → geralmente ERRADO
+   - Ex: "em regra", "salvo disposição" → geralmente CERTO
+5. DIFERENÇAS SUTIS — conceitos parecidos que confundem (com tabela comparativa)
+6. DICAS DE ELIMINAÇÃO — como eliminar alternativas sem saber 100% do conteúdo`;
         break;
       case "comparativo":
-        instrucao = `Crie um QUADRO COMPARATIVO sobre "${tema}".
-Use formato de tabela markdown comparando os conceitos relacionados.
-Colunas devem incluir: Conceito | Definição | Hipóteses | Efeitos | Fundamentação Legal.
-No final, destaque as DIFERENÇAS que mais caem em prova.`;
+        instrucao = `Crie um QUADRO COMPARATIVO COMPLETO sobre "${tema}" para concurso ${(concursoAlvo||"").trim()||"público"}.
+
+Formato obrigatório:
+1. TABELA PRINCIPAL em markdown com colunas: Conceito | Definição | Hipóteses/Requisitos | Efeitos/Consequências | Fundamentação Legal | Pegadinha de Prova
+
+2. TABELA DE DIFERENÇAS CRÍTICAS — compare os conceitos que mais confundem:
+   | Aspecto | Conceito A | Conceito B |
+   Com destaque para o que a banca ${(banca||"").trim()||"CESPE"} cobra
+
+3. RESUMO DAS DIFERENÇAS — em bullets, as distinções mais cobradas
+
+4. QUESTÕES COMPARATIVAS — 5 questões C/E que exploram as diferenças:
+   - PRIMEIRO todas sem gabarito
+   - DEPOIS gabarito comentado explicando a distinção
+
+5. DICA FINAL — como identificar qual conceito a banca está cobrando pelo enunciado`;
         break;
       case "jurisprudencia":
-        instrucao = `Liste as principais DECISÕES e SÚMULAS do STF, STJ e TCU sobre "${tema}".
-Para cada uma:
-- Órgão + número da decisão/súmula
-- Resumo do caso
-- Tese fixada
-- Por que isso cai em prova`;
+        instrucao = `Liste as principais DECISÕES, SÚMULAS e TESES FIXADAS sobre "${tema}" relevantes para concurso ${(concursoAlvo||"").trim()||"público"}.
+
+Para cada item, apresente:
+1. ÓRGÃO + IDENTIFICAÇÃO (ex: STF, RE 123.456 / Súmula Vinculante 13 / Acórdão TCU 1234/2023)
+2. CONTEXTO — breve resumo do caso ou situação
+3. TESE FIXADA — o que foi decidido (transcrever o trecho relevante)
+4. IMPACTO PARA PROVA — por que isso cai e como a banca ${(banca||"").trim()||"CESPE"} cobra
+5. PEGADINHA — como a banca distorce a tese para criar alternativa errada
+
+Organize por:
+- Súmulas Vinculantes do STF
+- Súmulas do STJ
+- Decisões do TCU
+- Teses de Repercussão Geral
+- Jurisprudência recente (últimos 3 anos)
+
+No final, crie 5 questões C/E baseadas nessas decisões (primeiro sem gabarito, depois comentadas).`;
         break;
       default:
-        instrucao = `Aborde o tema "${tema}" de forma completa.`;
+        instrucao = `Aborde o tema "${tema}" de forma completa para concurso ${(concursoAlvo||"").trim()||"público"}, banca ${(banca||"").trim()||"CESPE"}.`;
     }
 
     const prompt = `${BASE}\n\n${ctx.join("\n")}\n\n${instrucao}\n\nUse linguagem clara, exemplos concretos e referências à legislação quando aplicável. Adapte a profundidade ao nível "${nivelSel?.label || nivel}".`;
     setPromptGerado(prompt);
     setTimeout(() => { const el = document.getElementById("gp-output"); if (el) el.scrollIntoView({ behavior:"smooth", block:"start" }); }, 150);
+    }, 0); // end setTimeout defer
   }
 
   function handleCopiar() {
@@ -8994,8 +9167,9 @@ Para cada uma:
       <div className="card" style={{ marginBottom: 16 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 16 }}>
           <div>
-            <label style={{ fontSize: 11, fontWeight: 700, letterSpacing: .6, textTransform: "uppercase", color: "var(--t3)", display: "block", marginBottom: 6 }}>📖 Tema da aula *</label>
-            <input className="inp" value={tema} onChange={e => setTema(e.target.value)} onKeyDown={e => e.key === "Enter" && handleGerar()} placeholder="Ex: Controle de Constitucionalidade · Licitações Lei 14.133" />
+            <label style={{ fontSize: 11, fontWeight: 700, letterSpacing: .6, textTransform: "uppercase", color: temaErro ? "var(--red,#ef4444)" : "var(--t3)", display: "block", marginBottom: 6 }}>📖 Tema da aula *</label>
+            <input className="inp" value={tema} onChange={e => { setTema(e.target.value); if (e.target.value.trim()) setTemaErro(false); }} onKeyDown={e => e.key === "Enter" && handleGerar()} placeholder="Ex: Controle de Constitucionalidade · Licitações Lei 14.133" style={temaErro ? { borderColor: "var(--red,#ef4444)", boxShadow: "0 0 0 2px rgba(239,68,68,0.2)" } : {}} />
+            {temaErro && <div style={{ fontSize: 11, color: "var(--red,#ef4444)", marginTop: 4, fontWeight: 600 }}>⚠️ O tema da aula é obrigatório</div>}
           </div>
           <div>
             <label style={{ fontSize: 11, fontWeight: 700, letterSpacing: .6, textTransform: "uppercase", color: "var(--t3)", display: "block", marginBottom: 6 }}>📚 Matéria (opcional)</label>
@@ -9011,9 +9185,15 @@ Para cada uma:
         {modo === "apostila-completa" && (
           <div style={{ marginBottom: 16, padding: 14, borderRadius: 10, background: "var(--s2)", border: "1px dashed var(--b2)" }}>
             <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: .8, textTransform: "uppercase", color: "var(--green)", marginBottom: 10 }}>📘 Personalização da Apostila Completa</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
               <div>
-                <label style={{ fontSize: 10, fontWeight: 700, letterSpacing: .6, textTransform: "uppercase", color: "var(--t3)", display: "block", marginBottom: 6 }}>🎓 Área de Especialidade do professor</label>
+                <label style={{ fontSize: 10, fontWeight: 700, letterSpacing: .6, textTransform: "uppercase", color: "var(--t3)", display: "block", marginBottom: 6 }}>👤 Perfil do Professor</label>
+                <select className="inp" value={perfilProf} onChange={e => setPerfilProf(e.target.value)}>
+                  {PERFIS_PROF.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 10, fontWeight: 700, letterSpacing: .6, textTransform: "uppercase", color: "var(--t3)", display: "block", marginBottom: 6 }}>🎓 Área de Especialidade</label>
                 <input className="inp" value={especialidade} onChange={e => setEspecialidade(e.target.value)} placeholder="Ex: concursos públicos · medicina · direito tributário" />
               </div>
               <div>
@@ -9146,6 +9326,77 @@ class ErrorBoundary extends Component {
   }
 }
 
+// ============================================================
+// GLOBAL: Modal de Confirmação Customizado (substitui window.confirm/alert)
+// ============================================================
+let _modalResolve = null;
+let _modalSetState = null;
+
+function confirmar({ titulo, mensagem, tipo = "neutro", confirmLabel, cancelLabel }) {
+  return new Promise((resolve) => {
+    _modalResolve = resolve;
+    if (_modalSetState) {
+      _modalSetState({
+        open: true,
+        titulo: titulo || "Confirmar",
+        mensagem: mensagem || "",
+        tipo, // "destrutivo" | "neutro" | "info"
+        confirmLabel: confirmLabel || (tipo === "destrutivo" ? "Excluir" : "Confirmar"),
+        cancelLabel: cancelLabel || "Cancelar",
+      });
+    } else {
+      // Fallback se modal não montado
+      resolve(window.confirm(mensagem || titulo));
+    }
+  });
+}
+
+function alertar({ titulo, mensagem }) {
+  return new Promise((resolve) => {
+    _modalResolve = () => resolve(true);
+    if (_modalSetState) {
+      _modalSetState({
+        open: true,
+        titulo: titulo || "Aviso",
+        mensagem: mensagem || "",
+        tipo: "info",
+        confirmLabel: "OK",
+        cancelLabel: null, // sem botão cancelar
+      });
+    } else {
+      window.alert(mensagem || titulo);
+      resolve(true);
+    }
+  });
+}
+
+function ModalConfirmacao() {
+  const [state, setState] = useState({ open: false, titulo: "", mensagem: "", tipo: "neutro", confirmLabel: "Confirmar", cancelLabel: "Cancelar" });
+  useEffect(() => { _modalSetState = setState; return () => { _modalSetState = null; }; }, []);
+
+  if (!state.open) return null;
+
+  const handleConfirm = () => { setState(s => ({ ...s, open: false })); if (_modalResolve) { _modalResolve(true); _modalResolve = null; } };
+  const handleCancel = () => { setState(s => ({ ...s, open: false })); if (_modalResolve) { _modalResolve(false); _modalResolve = null; } };
+
+  const btnColor = state.tipo === "destrutivo" ? "var(--red,#ef4444)" : "var(--green,#22c55e)";
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9999,padding:16}} onClick={handleCancel}>
+      <div className="card" style={{maxWidth:440,width:"100%",animation:"fadeIn .15s"}} onClick={e => e.stopPropagation()}>
+        <h3 style={{margin:"0 0 10px",fontSize:16,color:"var(--t1)"}}>{state.titulo}</h3>
+        <p style={{margin:"0 0 20px",fontSize:13,color:"var(--t2)",lineHeight:1.6,whiteSpace:"pre-wrap"}}>{state.mensagem}</p>
+        <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+          {state.cancelLabel && (
+            <button className="btn btn-ghost" onClick={handleCancel}>{state.cancelLabel}</button>
+          )}
+          <button className="btn" style={{background:btnColor,color:"#fff"}} onClick={handleConfirm}>{state.confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [page, setPage] = useState("dashboard");
@@ -9221,6 +9472,7 @@ export default function App() {
   if (!user) return (
     <>
       <style dangerouslySetInnerHTML={{ __html: css }} />
+      <ModalConfirmacao />
       <LoginPage onLogin={handleLogin} />
     </>
   );
@@ -9264,6 +9516,7 @@ export default function App() {
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: css }} />
+      <ModalConfirmacao />
       <Layout user={user} page={page} setPage={setPage} onLogout={handleLogout}>
         <ErrorBoundary key={`${user?.id || "anon"}-${page}`}>
           {renderPage()}
