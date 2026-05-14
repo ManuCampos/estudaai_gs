@@ -20,7 +20,7 @@ async function sheetsGet(module, action, params = {}) {
 async function sheetsPost(module, action, body = {}) {
   const res = await fetch(APPS_SCRIPT_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'text/plain' },
     body: JSON.stringify({ module, action, ...body }),
   });
   const json = await res.json();
