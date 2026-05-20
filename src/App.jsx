@@ -402,6 +402,32 @@ const editaisModule = {
   },
   update(id, data) { storage.set(db => ({ ...db, editais: db.editais.map(e => e.id === id ? { ...e, ...data } : e) })); },
   delete(id) { storage.set(db => ({ ...db, editais: db.editais.filter(e => e.id !== id) })); },
+  duplicate(id, opts = {}) {
+    const original = storage.get().editais.find(e => e.id === id);
+    if (!original) return null;
+    const ts = Date.now();
+    // Clona materias/topicos gerando novos IDs para evitar colisões nos planos/progresso
+    const materias = (original.materias || []).map((m, mi) => ({
+      ...JSON.parse(JSON.stringify(m)),
+      id: `m${ts}-${mi}`,
+      topicos: (m.topicos || []).map((t, ti) => ({
+        ...JSON.parse(JSON.stringify(t)),
+        id: `t${ts}-${mi}-${ti}`,
+      })),
+    }));
+    const copy = {
+      ...original,
+      id: `ed${ts}`,
+      name: opts.name || `${original.name} (cópia)`,
+      coachId: opts.coachId || original.coachId,
+      materias,
+      createdAt: new Date().toISOString(),
+      duplicatedFrom: original.id,
+    };
+    storage.set(db => ({ ...db, editais: [...db.editais, copy] }));
+    logModule.add(opts.actorId || "system", `Edital "${original.name}" duplicado como "${copy.name}"`, { sourceId: id, newId: copy.id });
+    return copy;
+  },
   associarAluno(alunoId, editalId) {
     storage.set(db => {
       if (db.alunoEditais.find(ae => ae.alunoId === alunoId && ae.editalId === editalId)) return db;
@@ -3120,6 +3146,7 @@ const NAV = {
     { id: "progresso",      label: "Progresso",      icon: "📊" },
     { id: "conteudo",       label: "Conteúdo",       icon: "📚" },
     { id: "resumos",        label: "Resumos",        icon: "✍️" },
+    { id: "marcar-aulas",   label: "Marcar Aulas",   icon: "✅" },
     { id: "simulados",      label: "Simulados",      icon: "📝" },
     { id: "ranking",        label: "Ranking",        icon: "🏆" },
     { id: "batalha",       label: "Batalha",        icon: "⚔️" },
@@ -3346,10 +3373,16 @@ function AdminLogs() {
 // ============================================================
 // ADMIN: Marcar Aulas Manualmente (recuperação de histórico)
 // ============================================================
-function AdminMarcarAulas({ refresh }) {
-  const alunos  = usersModule.getAlunos();
+function AdminMarcarAulas({ user, refresh }) {
+  // Componente reaproveitado por admin e coach.
+  // - admin: vê todos alunos e editais
+  // - coach: vê apenas seus alunos e seus editais
+  const isCoach = user?.role === "coach";
+  const alunos  = isCoach ? usersModule.getAlunos(user.id) : usersModule.getAlunos();
   const db      = storage.get();
-  const editais = db.editais || [];
+  const editais = isCoach
+    ? (db.editais || []).filter(e => e.coachId === user.id)
+    : (db.editais || []);
   const planos  = db.planos  || [];
 
   const [alunoId, setAlunoId]   = useState(alunos[0]?.id || "");
@@ -3438,9 +3471,9 @@ function AdminMarcarAulas({ refresh }) {
 
     // 3) Registra no log de auditoria
     logModule.add(
-      "admin",
+      user?.id || "system",
       `Aula "${topicObj?.name || topicId}" marcada manualmente em ${data} para aluno ${alunoId}${resumoTrim ? " (com resumo)" : ""}`,
-      { alunoId, planoId: plano.id, topicId, data, manual: true }
+      { alunoId, planoId: plano.id, topicId, data, manual: true, role: user?.role }
     );
 
     // 4) Agenda revisões a partir da data informada
@@ -3484,7 +3517,7 @@ function AdminMarcarAulas({ refresh }) {
       ),
     }));
     persistToSheets(storage.get());
-    logModule.add("admin", `Marcação manual removida: aula ${tId} em ${dateKey} (aluno ${alunoId})`, { alunoId, planoId: plano.id, topicId: tId, data: dateKey });
+    logModule.add(user?.id || "system", `Marcação manual removida: aula ${tId} em ${dateKey} (aluno ${alunoId})`, { alunoId, planoId: plano.id, topicId: tId, data: dateKey, role: user?.role });
     notify("Marcação removida.");
     refresh?.();
   }
@@ -3756,26 +3789,39 @@ function AssocEditalModal({ aluno, editais, onClose }) {
 }
 
 function CoachEditais({ user, refresh }) {
+  const isAdmin = user.role === "admin";
   const [modal, setModal]   = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm]     = useState({name:"",materias:[]});
+  const [form, setForm]     = useState({name:"",materias:[],coachId:""});
   const [matM, setMatM]     = useState(false);
   const [matForm, setMatForm] = useState({name:"",color:"#6366f1",topicos:[],reviewPreset:"moderada"});
   const [matRaw, setMatRaw]   = useState("");
   const [editMatIdx, setEditMatIdx] = useState(null);
   const [confirm, setConfirm] = useState(null);
+  const [confirmDup, setConfirmDup] = useState(null);
   // Material attachment modal: { idx, tab:"upload"|"url", urlInput, uploading, error }
   const [matAttach, setMatAttach] = useState(null);
   // Topic details editor: { idx, promptSugerido, conteudoAlta, conteudoMedia, conteudoBaixa }
   const [topicoEditar, setTopicoEditar] = useState(null);
-  const editais = editaisModule.getByCoach(user.id);
+  const editais = isAdmin ? editaisModule.getAll() : editaisModule.getByCoach(user.id);
+  const coaches = usersModule.getCoaches();
 
-  function openNew()  { setEditing(null); setForm({name:"",materias:[]}); setModal(true); }
-  function openEdit(e){ setEditing(e.id); setForm({name:e.name,materias:JSON.parse(JSON.stringify(e.materias))}); setModal(true); }
+  function openNew()  { setEditing(null); setForm({name:"",materias:[],coachId: isAdmin ? (coaches[0]?.id || "") : user.id}); setModal(true); }
+  function openEdit(e){ setEditing(e.id); setForm({name:e.name,materias:JSON.parse(JSON.stringify(e.materias)), coachId: e.coachId}); setModal(true); }
+  function duplicarEdital(e) {
+    editaisModule.duplicate(e.id, { actorId: user.id });
+    refresh();
+    setConfirmDup(null);
+  }
   function saveEdital() {
     if (!form.name) return;
-    if (editing) editaisModule.update(editing,{name:form.name,materias:form.materias});
-    else editaisModule.create({name:form.name,coachId:user.id,materias:form.materias});
+    if (editing) {
+      const data = {name:form.name,materias:form.materias};
+      if (isAdmin && form.coachId) data.coachId = form.coachId;
+      editaisModule.update(editing, data);
+    } else {
+      editaisModule.create({name:form.name,coachId: isAdmin ? (form.coachId || user.id) : user.id,materias:form.materias});
+    }
     refresh(); setModal(false);
   }
   function parseTopicosRaw(raw) {
@@ -3873,11 +3919,24 @@ function CoachEditais({ user, refresh }) {
   return (
     <div>
       <div className="ph"><div><h1>Editais</h1><p>Gerencie editais e matérias</p></div><button className="btn btn-green" onClick={openNew}>+ Novo Edital</button></div>
-      {editais.length===0?<div className="card"><div className="empty"><h3>Nenhum edital</h3></div></div>:editais.map(e=>(
+      {editais.length===0?<div className="card"><div className="empty"><h3>Nenhum edital</h3></div></div>:editais.map(e=>{
+        const ownerCoach = isAdmin ? usersModule.getById(e.coachId) : null;
+        return (
         <div className="sec-card" key={e.id}>
           <div className="sec-hd">
-            <div><div className="fw7 fh" style={{fontSize:15}}>{e.name}</div><div className="text-xs text-dim mt2">{e.materias.reduce((a,m)=>a+m.topicos.length,0)} tópicos</div></div>
-            <div className="row"><button className="btn btn-ghost btn-sm" onClick={()=>openEdit(e)}>Editar</button><button className="btn btn-red btn-sm" onClick={()=>setConfirm(e.id)}>Remover</button></div>
+            <div>
+              <div className="fw7 fh" style={{fontSize:15}}>{e.name}</div>
+              <div className="text-xs text-dim mt2">
+                {e.materias.reduce((a,m)=>a+m.topicos.length,0)} tópicos
+                {isAdmin && ownerCoach && <> · Coach: <span className="badge bb">{ownerCoach.name}</span></>}
+                {isAdmin && !ownerCoach && e.coachId && <> · <span className="badge br">Coach removido</span></>}
+              </div>
+            </div>
+            <div className="row">
+              <button className="btn btn-ghost btn-sm" onClick={()=>openEdit(e)}>Editar</button>
+              <button className="btn btn-blue btn-sm" onClick={()=>setConfirmDup(e)}>📋 Duplicar</button>
+              <button className="btn btn-red btn-sm" onClick={()=>setConfirm(e.id)}>Remover</button>
+            </div>
           </div>
           <div style={{padding:"12px 18px 14px"}}>
             {e.materias.map(m=>(
@@ -3889,10 +3948,20 @@ function CoachEditais({ user, refresh }) {
             ))}
           </div>
         </div>
-      ))}
+        );
+      })}
       <Modal open={modal} onClose={()=>setModal(false)} title={editing?"Editar Edital":"Novo Edital"} wide
         footer={<><button className="btn btn-ghost" onClick={()=>setModal(false)}>Cancelar</button><button className="btn btn-green" onClick={saveEdital}>Salvar</button></>}>
         <div className="form-group"><label className="lbl">Nome do Edital</label><input className="inp" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Ex: Concurso TRT 2025"/></div>
+        {isAdmin && (
+          <div className="form-group">
+            <label className="lbl">Coach Responsável</label>
+            <select className="inp" value={form.coachId} onChange={e=>setForm(f=>({...f,coachId:e.target.value}))}>
+              <option value="">Selecione...</option>
+              {coaches.map(c => <option key={c.id} value={c.id}>{c.name} ({c.email})</option>)}
+            </select>
+          </div>
+        )}
         <div className="row-b mb3 mt4"><span className="fw7 fh">Matérias ({form.materias.length})</span><button className="btn btn-ghost btn-sm" onClick={openNewMat}>+ Matéria</button></div>
         {form.materias.length===0?<p className="text-muted text-sm mb3">Nenhuma matéria.</p>:form.materias.map((m,idx)=>(
           <div key={m.id} className="card-sm row-b mb2">
@@ -3949,6 +4018,13 @@ function CoachEditais({ user, refresh }) {
         </div>
       </Modal>
       <Confirm open={!!confirm} onClose={()=>setConfirm(null)} onConfirm={()=>{editaisModule.delete(confirm);refresh();setConfirm(null);}} title="Remover Edital" message="Tem certeza?"/>
+      <Confirm
+        open={!!confirmDup}
+        onClose={()=>setConfirmDup(null)}
+        onConfirm={()=>duplicarEdital(confirmDup)}
+        title="Duplicar Edital"
+        message={confirmDup ? `Será criada uma cópia de "${confirmDup.name}" que você pode editar livremente. Confirmar?` : ""}
+      />
       {matAttach!==null&&(
         <div className="overlay" onClick={()=>setMatAttach(null)} style={{zIndex:9999}}>
           <div className="modal fi" style={{maxWidth:400}} onClick={e=>e.stopPropagation()}>
@@ -9796,7 +9872,7 @@ export default function App() {
       if (page === "dashboard")    return <AdminDashboard    refresh={refresh}/>;
       if (page === "coaches")      return <AdminCoaches      refresh={refresh}/>;
       if (page === "alunos")       return <AdminAlunos       refresh={refresh}/>;
-      if (page === "marcar-aulas") return <AdminMarcarAulas  refresh={refresh}/>;
+      if (page === "marcar-aulas") return <AdminMarcarAulas  user={user} refresh={refresh}/>;
       if (page === "logs")         return <AdminLogs/>;
       if (page === "debug")        return <AdminDebug/>;
     }
@@ -9808,6 +9884,7 @@ export default function App() {
       if (page === "progresso")       return <CoachProgresso       user={user}/>;
       if (page === "conteudo")        return <CoachConteudo        user={user} refresh={refresh}/>;
       if (page === "resumos")         return <CoachResumos         user={user} refresh={refresh}/>;
+      if (page === "marcar-aulas")    return <AdminMarcarAulas     user={user} refresh={refresh}/>;
       if (page === "simulados")       return <CoachSimulados       user={user} refresh={refresh}/>;
       if (page === "ranking")         return <CoachRanking         user={user}/>;
       if (page === "gerador-prompt")  return <GeradorDePrompt/>;
