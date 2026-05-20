@@ -3105,11 +3105,12 @@ function LoginPage({ onLogin }) {
 // ============================================================
 const NAV = {
   admin: [
-    { id: "dashboard", label: "Dashboard", icon: "⊞" },
-    { id: "coaches",   label: "Coaches",   icon: "🎓" },
-    { id: "alunos",    label: "Alunos",    icon: "👥" },
-    { id: "logs",      label: "Logs",      icon: "📋" },
-    { id: "debug",     label: "Debug",     icon: "🔧" },
+    { id: "dashboard",    label: "Dashboard",    icon: "⊞" },
+    { id: "coaches",      label: "Coaches",      icon: "🎓" },
+    { id: "alunos",       label: "Alunos",       icon: "👥" },
+    { id: "marcar-aulas", label: "Marcar Aulas", icon: "✅" },
+    { id: "logs",         label: "Logs",         icon: "📋" },
+    { id: "debug",        label: "Debug",        icon: "🔧" },
   ],
   coach: [
     { id: "dashboard",      label: "Dashboard",      icon: "⊞" },
@@ -3338,6 +3339,309 @@ function AdminLogs() {
           </table>
         }
       </div>
+    </div>
+  );
+}
+
+// ============================================================
+// ADMIN: Marcar Aulas Manualmente (recuperação de histórico)
+// ============================================================
+function AdminMarcarAulas({ refresh }) {
+  const alunos  = usersModule.getAlunos();
+  const db      = storage.get();
+  const editais = db.editais || [];
+  const planos  = db.planos  || [];
+
+  const [alunoId, setAlunoId]   = useState(alunos[0]?.id || "");
+  const [editalId, setEditalId] = useState("");
+  const [topicId, setTopicId]   = useState("");
+  const [data, setData]         = useState(localDateKey());
+  const [resumo, setResumo]     = useState("");
+  const [saving, setSaving]     = useState(false);
+  const [msg, setMsg]           = useState("");
+
+  // Editais relacionados ao aluno: associados OU com plano existente
+  const alunoEditaisIds = new Set([
+    ...(db.alunoEditais || []).filter(ae => ae.alunoId === alunoId).map(ae => ae.editalId),
+    ...planos.filter(p => p.alunoId === alunoId).map(p => p.editalId),
+  ]);
+  const editaisDoAluno = editais.filter(e => alunoEditaisIds.has(e.id));
+
+  // Reseta seleções quando muda aluno/edital
+  useEffect(() => {
+    setEditalId(editaisDoAluno[0]?.id || "");
+    setTopicId("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [alunoId]);
+  useEffect(() => { setTopicId(""); }, [editalId]);
+
+  const edital = editais.find(e => e.id === editalId);
+  const plano  = planos.find(p => p.alunoId === alunoId && p.editalId === editalId);
+
+  // Tópicos do edital (achatados, mantendo a referência à matéria)
+  const allTopics = [];
+  edital?.materias?.forEach(mat => {
+    (mat.topicos || []).forEach(t => {
+      allTopics.push({
+        ...t,
+        materiaId:   mat.id,
+        materiaName: mat.name,
+        materiaColor: mat.color,
+        materiaReviewPreset: mat.reviewPreset,
+      });
+    });
+  });
+
+  // Aulas já marcadas como feitas para este aluno/plano
+  const progressoMarcado = plano
+    ? (db.progresso || []).filter(p =>
+        p.alunoId === alunoId && p.planoId === plano.id && p.done && !p.key.endsWith("-rev")
+      )
+    : [];
+
+  // Map: topicId -> [{ dateKey, at }]
+  const marcadasPorTopic = {};
+  progressoMarcado.forEach(p => {
+    const dateKey = p.key.substring(0, 10);
+    const tId     = p.key.substring(11);
+    if (!marcadasPorTopic[tId]) marcadasPorTopic[tId] = [];
+    marcadasPorTopic[tId].push({ dateKey, at: p.at });
+  });
+  const totalMarcadas = Object.values(marcadasPorTopic).reduce((a, arr) => a + arr.length, 0);
+
+  function notify(text, isWarn = false) {
+    setMsg((isWarn ? "⚠️ " : "") + text);
+    setTimeout(() => setMsg(""), 4000);
+  }
+
+  function salvar() {
+    if (!alunoId || !editalId || !topicId || !data) {
+      notify("Preencha aluno, edital, aula e data.", true);
+      return;
+    }
+    if (!plano) {
+      notify("O aluno não possui plano para este edital. Crie um plano antes de marcar aulas.", true);
+      return;
+    }
+    setSaving(true);
+
+    const topicObj = allTopics.find(t => t.id === topicId);
+    const resumoTrim = (resumo || "").trim();
+
+    // 1) Marca a aula como concluída na data informada
+    progressoModule.saveDone(alunoId, plano.id, `${data}-${topicId}`);
+
+    // 2) Salva o resumo (se informado) como anotação da aula
+    if (resumoTrim) {
+      progressoModule.saveNote(alunoId, plano.id, topicId, resumoTrim, topicObj?.name);
+    }
+
+    // 3) Registra no log de auditoria
+    logModule.add(
+      "admin",
+      `Aula "${topicObj?.name || topicId}" marcada manualmente em ${data} para aluno ${alunoId}${resumoTrim ? " (com resumo)" : ""}`,
+      { alunoId, planoId: plano.id, topicId, data, manual: true }
+    );
+
+    // 4) Agenda revisões a partir da data informada
+    if (topicObj) {
+      storage.set(db => {
+        const planosUpd = db.planos.map(p => {
+          if (p.id !== plano.id) return p;
+          const np = JSON.parse(JSON.stringify(p.plan || {}));
+          const lessonDate = new Date(data + "T12:00:00");
+          const intervals = REVIEW_PRESETS[topicObj.materiaReviewPreset || "moderada"] || REVIEW_INTERVALS;
+          intervals.forEach(interval => {
+            const rd = new Date(lessonDate);
+            rd.setDate(rd.getDate() + interval);
+            const rk = localDateKey(rd);
+            if (!np[rk]) np[rk] = { date: rk, topicos: [], reviews: [] };
+            if (!np[rk].reviews.find(r => r.id === topicId)) {
+              np[rk].reviews.push({ ...topicObj, reviewInterval: interval });
+            }
+          });
+          return { ...p, plan: np };
+        });
+        return { ...db, planos: planosUpd };
+      });
+    }
+
+    persistToSheets(storage.get());
+
+    notify(`"${topicObj?.name || "Aula"}" marcada como feita em ${new Date(data + "T12:00:00").toLocaleDateString("pt-BR")}.`);
+    setTopicId("");
+    setResumo("");
+    setSaving(false);
+    refresh?.();
+  }
+
+  function desmarcar(tId, dateKey) {
+    if (!plano) return;
+    storage.set(db => ({
+      ...db,
+      progresso: (db.progresso || []).filter(p =>
+        !(p.alunoId === alunoId && p.planoId === plano.id && p.key === `${dateKey}-${tId}`)
+      ),
+    }));
+    persistToSheets(storage.get());
+    logModule.add("admin", `Marcação manual removida: aula ${tId} em ${dateKey} (aluno ${alunoId})`, { alunoId, planoId: plano.id, topicId: tId, data: dateKey });
+    notify("Marcação removida.");
+    refresh?.();
+  }
+
+  const podeSalvar = alunoId && editalId && topicId && data && plano && !saving;
+
+  return (
+    <div>
+      <div className="ph">
+        <div>
+          <h1>✅ Marcar Aulas Manualmente</h1>
+          <p>Registre aulas que o aluno realizou — útil para recuperar histórico perdido.</p>
+        </div>
+      </div>
+
+      {msg && (
+        <div style={{
+          padding: "12px 16px", borderRadius: 8, marginBottom: 16,
+          background: msg.startsWith("⚠️") ? "var(--amber-d)" : "var(--green-d)",
+          color: msg.startsWith("⚠️") ? "var(--amber)" : "var(--green)",
+          border: `1px solid ${msg.startsWith("⚠️") ? "var(--amber)" : "var(--green)"}`,
+          fontWeight: 600, fontSize: 13,
+        }}>{msg}</div>
+      )}
+
+      <div className="card mb4">
+        <div className="card-title">Nova Marcação</div>
+
+        <div className="form-group">
+          <label className="lbl">Aluno</label>
+          <select className="inp" value={alunoId} onChange={e => setAlunoId(e.target.value)}>
+            <option value="">Selecione...</option>
+            {alunos.map(a => (
+              <option key={a.id} value={a.id}>{a.name} ({a.email})</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="form-group">
+          <label className="lbl">Edital</label>
+          <select className="inp" value={editalId} onChange={e => setEditalId(e.target.value)} disabled={!alunoId}>
+            <option value="">Selecione...</option>
+            {editaisDoAluno.map(e => (
+              <option key={e.id} value={e.id}>{e.name}</option>
+            ))}
+          </select>
+          {alunoId && editaisDoAluno.length === 0 && (
+            <div className="text-xs text-dim mt2">Este aluno não possui editais associados.</div>
+          )}
+          {alunoId && editalId && !plano && (
+            <div className="text-xs" style={{ color: "var(--amber)", marginTop: 6 }}>
+              ⚠️ Não há plano gerado para este aluno/edital. Peça ao coach para gerar antes de marcar aulas.
+            </div>
+          )}
+        </div>
+
+        <div className="form-group">
+          <label className="lbl">Aula (Tópico)</label>
+          <select className="inp" value={topicId} onChange={e => setTopicId(e.target.value)} disabled={!editalId}>
+            <option value="">Selecione...</option>
+            {edital?.materias?.map(mat => (
+              <optgroup key={mat.id} label={mat.name}>
+                {(mat.topicos || []).map(t => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </div>
+
+        <div className="form-group">
+          <label className="lbl">Data da Realização</label>
+          <input
+            className="inp"
+            type="date"
+            value={data}
+            max={localDateKey()}
+            onChange={e => setData(e.target.value)}
+          />
+          <div className="text-xs text-dim mt2">Selecione o dia em que o aluno realmente fez a aula.</div>
+        </div>
+
+        <div className="form-group">
+          <label className="lbl">Resumo (opcional)</label>
+          <textarea
+            className="inp"
+            rows={5}
+            placeholder="Cole ou escreva um resumo do que o aluno estudou nessa aula..."
+            value={resumo}
+            onChange={e => setResumo(e.target.value)}
+            style={{ resize: "vertical", minHeight: 100, fontFamily: "inherit" }}
+          />
+          <div className="text-xs text-dim mt2">
+            O resumo será salvo como anotação do aluno para esta aula e ficará visível em "Resumos".
+          </div>
+        </div>
+
+        <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+          <button className="btn btn-green" onClick={salvar} disabled={!podeSalvar}>
+            {saving ? "Salvando..." : "💾 Marcar como Feita"}
+          </button>
+        </div>
+      </div>
+
+      {plano && (
+        <div className="card">
+          <div className="card-title">Aulas Já Marcadas ({totalMarcadas})</div>
+          {totalMarcadas === 0 ? (
+            <div className="empty">
+              <h3>Nenhuma aula marcada</h3>
+              <p>Use o formulário acima para registrar aulas realizadas.</p>
+            </div>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Aula</th>
+                  <th>Matéria</th>
+                  <th>Data Realizada</th>
+                  <th>Resumo</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(marcadasPorTopic)
+                  .flatMap(([tId, entries]) => entries.map(en => ({ tId, ...en })))
+                  .sort((a, b) => (b.dateKey || "").localeCompare(a.dateKey || ""))
+                  .map(({ tId, dateKey }) => {
+                    const topic = allTopics.find(t => t.id === tId);
+                    const note  = progressoModule.getNote(alunoId, plano.id, tId);
+                    return (
+                      <tr key={`${tId}-${dateKey}`}>
+                        <td className="fw6">{topic?.name || <span className="text-dim">Tópico removido ({tId})</span>}</td>
+                        <td>
+                          {topic ? (
+                            <span className="badge" style={{
+                              background: `${topic.materiaColor}22`,
+                              color: topic.materiaColor,
+                              border: `1px solid ${topic.materiaColor}66`,
+                            }}>{topic.materiaName}</span>
+                          ) : <span className="text-dim">—</span>}
+                        </td>
+                        <td className="text-sm">{new Date(dateKey + "T12:00:00").toLocaleDateString("pt-BR")}</td>
+                        <td className="text-xs text-dim" style={{ maxWidth: 280 }}>
+                          {note ? (note.length > 100 ? note.substring(0, 100) + "…" : note) : <span className="text-dim">—</span>}
+                        </td>
+                        <td>
+                          <button className="btn btn-red btn-xs" onClick={() => desmarcar(tId, dateKey)}>Desmarcar</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -9489,11 +9793,12 @@ export default function App() {
 
   function renderPage() {
     if (user.role === "admin") {
-      if (page === "dashboard") return <AdminDashboard refresh={refresh}/>;
-      if (page === "coaches")   return <AdminCoaches   refresh={refresh}/>;
-      if (page === "alunos")    return <AdminAlunos    refresh={refresh}/>;
-      if (page === "logs")      return <AdminLogs/>;
-      if (page === "debug")     return <AdminDebug/>;
+      if (page === "dashboard")    return <AdminDashboard    refresh={refresh}/>;
+      if (page === "coaches")      return <AdminCoaches      refresh={refresh}/>;
+      if (page === "alunos")       return <AdminAlunos       refresh={refresh}/>;
+      if (page === "marcar-aulas") return <AdminMarcarAulas  refresh={refresh}/>;
+      if (page === "logs")         return <AdminLogs/>;
+      if (page === "debug")        return <AdminDebug/>;
     }
     if (user.role === "coach") {
       if (page === "dashboard")       return <CoachDashboard       user={user} refresh={refresh}/>;
