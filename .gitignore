@@ -38,3 +38,28 @@ Thumbs.db
 estudaai/
 _legacy/
 scripts/base.json
+
+# Adicionado pelo DevTool v2
+# DevTool / secrets
+devtool_config.json
+.env.*
+!.env.example
+.vercel/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.vite/
+.next/
+out/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.streamlit/secrets.toml
+
+# OS / editor
